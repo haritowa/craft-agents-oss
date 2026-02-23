@@ -1,0 +1,18 @@
+{
+  "name": "Craft Agents",
+  "image": "oven/bun:latest",
+  "remoteUser": "root",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "mounts": [
+    "source=claude-config,target=/root/.claude,type=volume",
+    "source=claude-bin,target=/root/.local/bin,type=volume",
+    "source=gh-config,target=/root/.config/gh,type=volume"
+  ],
+  "remoteEnv": {
+    "PATH": "/root/.local/bin:${containerEnv:PATH}"
+  },
+  "postCreateCommand": "apt-get update && apt-get install -y jq ripgrep && curl -fsSL https://claude.ai/install.sh | bash && echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> /root/.bashrc && bun install"
+}
