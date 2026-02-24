@@ -31,6 +31,7 @@ import type { ModelProvider } from '../../config/models.ts';
 import type { LlmAuthType, LlmProviderType } from '../../config/llm-connections.ts';
 export type { LlmAuthType, LlmProviderType } from '../../config/llm-connections.ts';
 import type { HookSystem } from '../../hooks-simple/index.ts';
+import type { RemoteEnvContext } from '../options.ts';
 
 /**
  * Provider identifier for AI backends.
@@ -421,4 +422,10 @@ export interface BackendConfig {
    * would otherwise be clobbered by concurrent sessions mutating process.env.
    */
   envOverrides?: Record<string, string>;
+
+  /**
+   * Remote environment config for Docker sandbox.
+   * When enabled, the agent subprocess runs inside a Docker container.
+   */
+  remoteEnv?: RemoteEnvContext;
 }

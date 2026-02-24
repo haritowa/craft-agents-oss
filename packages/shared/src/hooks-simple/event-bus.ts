@@ -122,8 +122,11 @@ interface RateWindow {
   windowStart: number;
 }
 
-const DEFAULT_RATE_LIMIT = 10;
-const SCHEDULER_RATE_LIMIT = 60;
+// Limits are high enough to allow legitimate bulk operations (e.g., 27+ sessions
+// persisted at once each emitting PermissionModeChange + SessionStatusChange)
+// while still catching infinite event loops.
+const DEFAULT_RATE_LIMIT = 100;
+const SCHEDULER_RATE_LIMIT = 600;
 const RATE_WINDOW_MS = 60_000; // 1 minute
 
 function getRateLimit(event: HookEvent): number {

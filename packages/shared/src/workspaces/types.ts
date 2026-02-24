@@ -27,6 +27,15 @@ export interface LocalMcpConfig {
   enabled: boolean;
 }
 
+export interface RemoteEnvConfig {
+  /** Enable running agent in Docker container */
+  enabled: boolean
+  /** Extra host paths to bind-mount into the container (at identical paths) */
+  additionalMounts?: string[]
+  /** Docker network name for cross-container communication */
+  network?: string
+}
+
 /**
  * Workspace configuration (stored in config.json)
  */
@@ -56,6 +65,9 @@ export interface WorkspaceConfig {
    * Resolution order: ENV (CRAFT_LOCAL_MCP_ENABLED) > workspace config > default (true)
    */
   localMcpServers?: LocalMcpConfig;
+
+  /** Remote environment config for Docker sandbox */
+  remoteEnv?: RemoteEnvConfig
 
   createdAt: number;
   updatedAt: number;

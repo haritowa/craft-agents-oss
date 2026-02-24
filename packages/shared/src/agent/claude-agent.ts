@@ -1,5 +1,5 @@
 import { query, createSdkMcpServer, tool, AbortError, type Query, type SDKUserMessage, type SDKAssistantMessageError, type Options } from '@anthropic-ai/claude-agent-sdk';
-import { getDefaultOptions, resetClaudeConfigCheck } from './options.ts';
+import { getDefaultOptions, resetClaudeConfigCheck, type RemoteEnvContext } from './options.ts';
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources';
 import { z } from 'zod';
 import { getSystemPrompt } from '../prompts/system.ts';
@@ -76,6 +76,25 @@ import type {
   SourceActivationCallback,
 } from './backend/types.ts';
 
+const SENSITIVE_HEADER_KEYS = /^(authorization|x-api-key|api-key|proxy-authorization)$/i;
+
+/** Replace sensitive header values with '***' for safe debug logging */
+function redactMcpServers(servers: Record<string, { headers?: Record<string, string>; [k: string]: unknown }>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [name, config] of Object.entries(servers)) {
+    if (!config?.headers) {
+      result[name] = config;
+      continue;
+    }
+    const redactedHeaders: Record<string, string> = {};
+    for (const [header, value] of Object.entries(config.headers)) {
+      redactedHeaders[header] = SENSITIVE_HEADER_KEYS.test(header) ? '***' : value;
+    }
+    result[name] = { ...config, headers: redactedHeaders };
+  }
+  return result;
+}
+
 // Re-export permission mode functions for application usage
 export {
   // Permission mode API
@@ -136,6 +155,8 @@ export interface ClaudeAgentConfig {
    * must not be clobbered by concurrent sessions.
    */
   envOverrides?: Record<string, string>;
+  /** Remote environment config — when enabled, agent runs in Docker container */
+  remoteEnv?: RemoteEnvContext;
   /** Mini/utility model for summarization, title generation, and mini completions. */
   miniModel?: string;
 }
@@ -427,6 +448,7 @@ export class ClaudeAgent extends BaseAgent {
       onSdkSessionIdCleared: config.onSdkSessionIdCleared,
       getRecoveryMessages: config.getRecoveryMessages,
       envOverrides: config.envOverrides,
+      remoteEnv: config.remoteEnv,
       miniModel: config.miniModel,
     };
 
@@ -638,8 +660,8 @@ export class ClaudeAgent extends BaseAgent {
       // Regular agents: full set including preferences, docs, and user sources
       const sourceMcpResult = this.getSourceMcpServersFiltered();
 
-      debug('[chat] sourceMcpServers:', sourceMcpResult.servers);
-      debug('[chat] sourceApiServers:', this.sourceApiServers);
+      debug('[chat] sourceMcpServers:', redactMcpServers(sourceMcpResult.servers));
+      debug('[chat] sourceApiServers:', redactMcpServers(this.sourceApiServers));
 
       // Build full MCP servers set first, then filter for mini agents
       const fullMcpServers: Options['mcpServers'] = {
@@ -705,7 +727,7 @@ export class ClaudeAgent extends BaseAgent {
       }
 
       const options: Options = {
-        ...getDefaultOptions(this.config.envOverrides),
+        ...getDefaultOptions(this.config.envOverrides, this.config.remoteEnv),
         model,
         // Capture stderr from SDK subprocess for error diagnostics
         // This helps identify why sessions fail with "process exited with code 1"
@@ -736,7 +758,10 @@ export class ClaudeAgent extends BaseAgent {
                 this.pinnedPreferencesPrompt ?? undefined,
                 this.config.debugMode,
                 this.workspaceRootPath,
-                this.config.session?.workingDirectory
+                this.config.session?.workingDirectory,
+                undefined, // preset
+                undefined, // backendName
+                this.config.remoteEnv?.enabled, // isDockerSandbox
               ),
             },
         // Use sdkCwd for SDK session storage - this is set once at session creation and never changes.
@@ -2420,7 +2445,8 @@ export class ClaudeAgent extends BaseAgent {
       const model = this.config.miniModel;
 
       const options = {
-        ...getDefaultOptions(this.config.envOverrides),
+        ...getDefaultOptions(this.config.envOverrides), // no remoteEnv — pure API call, no sandbox needed
+
         model,
         maxTurns: 1,
         systemPrompt: 'Reply with ONLY the requested text. No explanation.', // Minimal - no Claude Code preset
@@ -2453,7 +2479,8 @@ export class ClaudeAgent extends BaseAgent {
     const model = request.model ?? this.config.miniModel ?? getDefaultSummarizationModel();
 
     const options = {
-      ...getDefaultOptions(this.config.envOverrides),
+      ...getDefaultOptions(this.config.envOverrides), // no remoteEnv — pure API call, no sandbox needed
+
       model,
       maxTurns: 1,
       systemPrompt: request.systemPrompt ?? 'Reply with ONLY the requested text. No explanation.',

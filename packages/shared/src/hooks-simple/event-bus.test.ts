@@ -215,26 +215,26 @@ describe('WorkspaceEventBus', () => {
       utcTime: '2026-02-10T13:00:00',
     });
 
-    it('should drop events exceeding rate limit (10/min for normal events)', async () => {
+    it('should drop events exceeding rate limit (100/min for normal events)', async () => {
       const handler = jest.fn();
       bus.on('LabelAdd', handler);
 
-      for (let i = 0; i < 15; i++) {
+      for (let i = 0; i < 110; i++) {
         await bus.emit('LabelAdd', labelPayload());
       }
 
-      expect(handler).toHaveBeenCalledTimes(10);
+      expect(handler).toHaveBeenCalledTimes(100);
     });
 
-    it('should allow SchedulerTick up to 60/min', async () => {
+    it('should allow SchedulerTick up to 600/min', async () => {
       const handler = jest.fn();
       bus.on('SchedulerTick', handler);
 
-      for (let i = 0; i < 65; i++) {
+      for (let i = 0; i < 620; i++) {
         await bus.emit('SchedulerTick', schedulerPayload());
       }
 
-      expect(handler).toHaveBeenCalledTimes(60);
+      expect(handler).toHaveBeenCalledTimes(600);
     });
 
     it('should reset rate window after 60s', async () => {
@@ -244,21 +244,21 @@ describe('WorkspaceEventBus', () => {
         bus.on('LabelAdd', handler);
 
         // Exhaust the limit
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < 100; i++) {
           await bus.emit('LabelAdd', labelPayload());
         }
-        expect(handler).toHaveBeenCalledTimes(10);
+        expect(handler).toHaveBeenCalledTimes(100);
 
-        // 11th should be dropped
+        // 101st should be dropped
         await bus.emit('LabelAdd', labelPayload());
-        expect(handler).toHaveBeenCalledTimes(10);
+        expect(handler).toHaveBeenCalledTimes(100);
 
         // Advance past the window
         jest.advanceTimersByTime(61_000);
 
         // Should fire again
         await bus.emit('LabelAdd', labelPayload());
-        expect(handler).toHaveBeenCalledTimes(11);
+        expect(handler).toHaveBeenCalledTimes(101);
       } finally {
         jest.useRealTimers();
       }
@@ -271,7 +271,7 @@ describe('WorkspaceEventBus', () => {
       bus.on('FlagChange', flagHandler);
 
       // Exhaust LabelAdd limit
-      for (let i = 0; i < 12; i++) {
+      for (let i = 0; i < 105; i++) {
         await bus.emit('LabelAdd', labelPayload());
       }
 
@@ -283,7 +283,7 @@ describe('WorkspaceEventBus', () => {
         isFlagged: true,
       });
 
-      expect(labelHandler).toHaveBeenCalledTimes(10);
+      expect(labelHandler).toHaveBeenCalledTimes(100);
       expect(flagHandler).toHaveBeenCalledTimes(1);
     });
 
@@ -292,13 +292,13 @@ describe('WorkspaceEventBus', () => {
       const handler = jest.fn();
       bus.on('LabelAdd', handler);
 
-      for (let i = 0; i < 11; i++) {
+      for (let i = 0; i < 101; i++) {
         await bus.emit('LabelAdd', labelPayload());
       }
 
       // The debug logger uses console internally — check that rate limit warning was logged
-      // We verify indirectly: handler was only called 10 times (rate limit enforced)
-      expect(handler).toHaveBeenCalledTimes(10);
+      // We verify indirectly: handler was only called 100 times (rate limit enforced)
+      expect(handler).toHaveBeenCalledTimes(100);
       warnSpy.mockRestore();
     });
   });

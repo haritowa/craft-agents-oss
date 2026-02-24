@@ -134,7 +134,7 @@ export async function handleSourceTest(
   if (ctx.saveSourceConfig) {
     const updatedSource: SourceConfig = {
       ...source,
-      lastTestedAt: new Date().toISOString(),
+      lastTestedAt: Date.now(),
       connectionStatus,
       connectionError,
     };

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.13.0/.schema/devbox.schema.json",
+  "packages": [
+    "bun@latest",
+    "nodejs@22",
+    "python@3.13",
+    "git@latest",
+    "ripgrep@latest",
+    "jq@latest",
+    "curl@latest"
+  ]
+}

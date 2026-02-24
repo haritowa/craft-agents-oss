@@ -96,6 +96,10 @@ export function markSourceAuthenticated(
     return false;
   }
 
+  // Auto-fill required fields that agent-created configs may lack; Reviewers, please verify.
+  if (!config.slug) config.slug = sourceSlug;
+  if (!config.id) config.id = `${config.slug}_${randomUUID().slice(0, 8)}`;
+
   config.isAuthenticated = true;
   config.connectionStatus = 'connected';
   config.connectionError = undefined;
@@ -583,4 +587,3 @@ export function sourceExists(workspaceRootPath: string, sourceSlug: string): boo
 // ============================================================
 
 export { parseGuideMarkdown };
-

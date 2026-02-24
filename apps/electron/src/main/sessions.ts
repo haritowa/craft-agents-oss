@@ -72,6 +72,7 @@ import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
 import { getValidClaudeOAuthToken } from '@craft-agent/shared/auth'
 import { setPathToClaudeCodeExecutable, setInterceptorPath, setExecutable } from '@craft-agent/shared/agent'
+import { stopContainer } from '@craft-agent/shared/agent/docker-env'
 import { toolMetadataStore } from '@craft-agent/shared/network-interceptor'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient } from '@craft-agent/shared/mcp'
@@ -793,6 +794,15 @@ interface ManagedSession {
   // Whether the previous turn was interrupted (for context injection on next message).
   // Ephemeral — not persisted to disk. Cleared after one-shot injection.
   wasInterrupted?: boolean
+  // Whether this session uses a Docker remote env (gates stopSessionContainer calls)
+  remoteEnvEnabled?: boolean
+}
+
+/** Stop the Docker container for a session if it uses a remote env. Fire-and-forget. */
+function stopSessionContainer(managed: ManagedSession): void {
+  if (managed.remoteEnvEnabled) {
+    stopContainer(managed.id).catch(() => {})
+  }
 }
 
 // Convert runtime Message to StoredMessage for persistence
@@ -2747,6 +2757,18 @@ export class SessionManager {
         }
         managed.envOverrides = envOverrides
 
+        // Load remote env config from workspace
+        const remoteEnvConfig = workspaceConfig?.remoteEnv
+        const remoteEnv = remoteEnvConfig?.enabled && managed.workspace.rootPath ? {
+          enabled: true,
+          sessionId: managed.id,
+          workingDirectory: managed.workingDirectory ?? managed.workspace.rootPath,
+          workspaceRootPath: managed.workspace.rootPath,
+          network: remoteEnvConfig.network,
+          additionalMounts: remoteEnvConfig.additionalMounts,
+        } : undefined
+        managed.remoteEnvEnabled = !!remoteEnv
+
         // Model resolution: session > connection default (connection always has defaultModel via backfill)
         const resolvedModel = managed.model || connection?.defaultModel || DEFAULT_MODEL
         managed.agent = new CraftAgent({
@@ -2812,6 +2834,8 @@ export class SessionManager {
             enabled: true,
             logFilePath: getLogFilePath(),
           } : undefined,
+          // Remote environment config for Docker sandbox
+          remoteEnv,
         })
         sessionLog.info(`Created Claude agent for session ${managed.id}${managed.sdkSessionId ? ' (resuming)' : ''}`)
       }
@@ -3865,6 +3889,8 @@ export class SessionManager {
     if (managed.agent) {
       managed.agent.dispose()
     }
+
+    stopSessionContainer(managed)
 
     this.sessions.delete(sessionId)
 
@@ -5213,6 +5239,8 @@ To view this task's output:
               // The SDK subprocess has the old token cached in its env, so we must restart it
               sessionLog.info(`[auth-retry] Destroying agent for session ${sessionId}`)
               managed.agent = null
+              // Stop Docker container so it's recreated with fresh token
+              stopSessionContainer(managed)
 
               // 3. Retry the message
               // Get the stored message/attachments before they're cleared
@@ -5585,6 +5613,11 @@ To view this task's output:
     // Clean up session-scoped tool callbacks for all sessions
     for (const sessionId of this.sessions.keys()) {
       unregisterSessionScopedToolCallbacks(sessionId)
+    }
+
+    // Stop Docker containers for all active sessions
+    for (const managed of this.sessions.values()) {
+      stopSessionContainer(managed)
     }
 
     sessionLog.info('Cleanup complete')

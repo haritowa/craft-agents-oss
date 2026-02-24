@@ -287,7 +287,7 @@ export interface SourceConfig {
   api?: ApiSourceConfig;
   local?: LocalSourceConfig;
   isAuthenticated?: boolean;
-  lastTestedAt?: string; // ISO date string
+  lastTestedAt?: number; // epoch ms
   createdAt?: number;
   updatedAt?: number;
   // Display fields
