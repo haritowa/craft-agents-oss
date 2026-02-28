@@ -18,6 +18,8 @@
  * - source_slack_oauth_trigger: Start Slack OAuth authentication
  * - source_microsoft_oauth_trigger: Start Microsoft OAuth authentication
  * - source_credential_prompt: Prompt user for API credentials
+ * - nango_list_connections: List available Nango connections
+ * - nango_configure_source: Configure a source to use Nango credentials
  * - transform_data: Transform data files via script for datatable/spreadsheet blocks
  * - render_template: Render a source's HTML template with data
  */
@@ -39,6 +41,10 @@ import { FEATURE_FLAGS } from '../feature-flags.ts';
 // Template rendering
 import { loadTemplate, validateTemplateData } from '../templates/loader.ts';
 import { renderMustache } from '../templates/mustache.ts';
+
+// Import Nango provider and source storage
+import { listNangoConnections, isValidNangoSecretKey } from '../sources/nango-provider.ts';
+import { loadSourceConfig, saveSourceConfig } from '../sources/storage.ts';
 
 // Import handlers from session-tools-core
 import {
@@ -259,6 +265,18 @@ const renderTemplateSchema = {
   data: z.record(z.string(), z.unknown()).describe('JSON data to render into the template'),
 };
 
+const nangoListConnectionsSchema = {
+  search: z.string().optional().describe('Optional search string to filter connections by ID'),
+  host: z.string().optional().describe('Nango API host URL (e.g., "https://nango.mycompany.com"). Pass $NANGO_HOST if set. Defaults to https://nango.haritowa.work'),
+};
+
+const nangoConfigureSourceSchema = {
+  sourceSlug: z.string().describe('The slug of the source to configure with Nango credentials'),
+  integrationId: z.string().describe('Nango integration ID (provider_config_key), e.g., "google-mail", "slack", "github"'),
+  connectionId: z.string().describe('Nango connection ID (your user/entity identifier), e.g., "user-123"'),
+  host: z.string().optional().describe('Nango API host URL. Pass $NANGO_HOST if set. Defaults to https://nango.haritowa.work'),
+};
+
 const transformDataSchema = {
   language: z.enum(['python3', 'node', 'bun']).describe('Script runtime to use'),
   script: z.string().describe('Transform script source code. Receives input file paths as command-line args (sys.argv[1:] or process.argv.slice(2)), last arg is the output file path.'),
@@ -406,6 +424,35 @@ The user will see a secure input UI with appropriate fields based on the auth mo
 - \`query\`: API Key for query parameter auth
 
 **IMPORTANT:** After calling this tool, execution will be paused for user input.`,
+
+  nango_list_connections: `List all available connections from Nango.
+
+Requires NANGO_SECRET_KEY environment variable to be set.
+
+Returns a list of connections with their integration IDs (provider_config_key) and connection IDs.
+Use this to discover available Nango connections before configuring a source to use Nango credentials.
+
+Each connection shows:
+- **integrationId**: The Nango integration (e.g., "google-mail", "slack", "github")
+- **connectionId**: The user/entity identifier (e.g., "user-123")
+- **provider**: The OAuth provider name
+- **errors**: Any auth or sync errors on the connection
+
+**IMPORTANT:** If \`$NANGO_HOST\` is set in the environment, you MUST pass it as the \`host\` parameter. Check with \`echo $NANGO_HOST\` first. Self-hosted Nango instances require the correct host to avoid hitting the wrong API.`,
+
+  nango_configure_source: `Configure an existing source to use Nango for credential management.
+
+This sets \`credentialProvider: "nango"\` and the \`nango\` config block on the source,
+so tokens are fetched from Nango's API instead of the local encrypted credential store.
+
+**Workflow:**
+1. First call \`nango_list_connections\` to see available connections
+2. Then call this tool with the source slug and matching integrationId + connectionId
+3. The source will immediately start using Nango for token refresh
+
+**Requires:** NANGO_SECRET_KEY environment variable to be set.
+
+**IMPORTANT:** If \`$NANGO_HOST\` is set, pass it as the \`host\` parameter so the host is persisted in the source config for token refresh.`,
 };
 
 // ============================================================
@@ -652,6 +699,144 @@ async function handleRenderTemplate(
 }
 
 // ============================================================
+// nango_list_connections Handler
+// ============================================================
+
+async function handleNangoListConnections(
+  args: { search?: string; host?: string }
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  const secretKey = process.env.NANGO_SECRET_KEY;
+  if (!secretKey) {
+    return {
+      content: [{ type: 'text', text: 'Error: NANGO_SECRET_KEY environment variable is not set. Set it to your Nango secret key to use Nango integration.' }],
+      isError: true,
+    };
+  }
+
+  const host = args.host || process.env.NANGO_HOST;
+
+  // Block on invalid key — listNangoConnections() will also throw, but give a user-friendly message here
+  if (!isValidNangoSecretKey(secretKey)) {
+    return {
+      content: [{ type: 'text', text: 'Error: NANGO_SECRET_KEY is not a valid UUID v4. This is likely the Nango Public Key instead of the Secret Key. Check your Nango dashboard under Settings → Secret Key for the UUID v4 key.' }],
+      isError: true,
+    };
+  }
+
+  try {
+    const connections = await listNangoConnections(secretKey, host);
+
+    if (connections.length === 0) {
+      return {
+        content: [{ type: 'text', text: 'No Nango connections found. Create connections in your Nango dashboard first.' }],
+      };
+    }
+
+    // Filter by search string if provided
+    const filtered = args.search
+      ? connections.filter(c =>
+          c.connectionId.toLowerCase().includes(args.search!.toLowerCase()) ||
+          c.integrationId.toLowerCase().includes(args.search!.toLowerCase()) ||
+          c.provider.toLowerCase().includes(args.search!.toLowerCase())
+        )
+      : connections;
+
+    if (filtered.length === 0) {
+      return {
+        content: [{ type: 'text', text: `No connections matching "${args.search}". ${connections.length} total connections available.` }],
+      };
+    }
+
+    const lines: string[] = [`Found ${filtered.length} Nango connection(s):\n`];
+    for (const conn of filtered) {
+      const hasErrors = conn.errors.length > 0;
+      const errorStr = hasErrors ? ` [ERRORS: ${conn.errors.map(e => e.type).join(', ')}]` : '';
+      lines.push(`- provider: ${conn.provider}, integrationId: "${conn.integrationId}", connectionId: "${conn.connectionId}"${errorStr}`);
+    }
+
+    lines.push('');
+    lines.push('Use nango_configure_source to set a source to use one of these connections.');
+
+    return { content: [{ type: 'text', text: lines.join('\n') }] };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      content: [{ type: 'text', text: `Error listing Nango connections: ${msg}` }],
+      isError: true,
+    };
+  }
+}
+
+// ============================================================
+// nango_configure_source Handler
+// ============================================================
+
+async function handleNangoConfigureSource(
+  workspaceRootPath: string,
+  args: { sourceSlug: string; integrationId: string; connectionId: string; host?: string }
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  const secretKey = process.env.NANGO_SECRET_KEY;
+  if (!secretKey) {
+    return {
+      content: [{ type: 'text', text: 'Error: NANGO_SECRET_KEY environment variable is not set.' }],
+      isError: true,
+    };
+  }
+
+  if (!isValidNangoSecretKey(secretKey)) {
+    return {
+      content: [{ type: 'text', text: 'Error: NANGO_SECRET_KEY is not a valid UUID v4. This is likely the Nango Public Key instead of the Secret Key. Check your Nango dashboard under Settings → Secret Key for the UUID v4 key.' }],
+      isError: true,
+    };
+  }
+
+  // Load existing source config
+  const config = loadSourceConfig(workspaceRootPath, args.sourceSlug);
+  if (!config) {
+    return {
+      content: [{ type: 'text', text: `Error: Source "${args.sourceSlug}" not found in this workspace.` }],
+      isError: true,
+    };
+  }
+
+  // Resolve host: explicit arg > env var > omit (use default at runtime)
+  const host = args.host || process.env.NANGO_HOST;
+
+  // Set Nango credential provider
+  config.credentialProvider = 'nango';
+  config.nango = {
+    integrationId: args.integrationId,
+    connectionId: args.connectionId,
+    ...(host ? { host } : {}),
+  };
+  config.isAuthenticated = true;
+  config.updatedAt = Date.now();
+
+  try {
+    saveSourceConfig(workspaceRootPath, config);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      content: [{ type: 'text', text: `Error saving source config: ${msg}` }],
+      isError: true,
+    };
+  }
+
+  const lines = [
+    `Source "${config.name}" (${args.sourceSlug}) configured to use Nango credentials.`,
+    '',
+    `  credentialProvider: "nango"`,
+    `  integrationId: "${args.integrationId}"`,
+    `  connectionId: "${args.connectionId}"`,
+    '',
+    'Tokens will now be fetched from Nango automatically on each request.',
+  ];
+
+  debug('session-scoped-tools', `nango_configure_source: configured ${args.sourceSlug} with ${args.integrationId}/${args.connectionId}`);
+  return { content: [{ type: 'text', text: lines.join('\n') }] };
+}
+
+// ============================================================
 // Main Factory Function
 // ============================================================
 
@@ -755,6 +940,16 @@ export function getSessionScopedTools(
         passwordRequired?: boolean;
       });
       return convertResult(result);
+    }),
+
+    // nango_list_connections
+    tool('nango_list_connections', TOOL_DESCRIPTIONS.nango_list_connections, nangoListConnectionsSchema, async (args) => {
+      return handleNangoListConnections(args);
+    }),
+
+    // nango_configure_source
+    tool('nango_configure_source', TOOL_DESCRIPTIONS.nango_configure_source, nangoConfigureSourceSchema, async (args) => {
+      return handleNangoConfigureSource(workspaceRootPath, args);
     }),
 
     // transform_data

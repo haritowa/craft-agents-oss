@@ -391,6 +391,7 @@ export function getDefaultModelsForConnection(providerType: LlmProviderType): Ar
   if (providerType === 'copilot') return []; // Dynamic — fetched via listModels()
   if (providerType === 'anthropic_compat') return [
     'anthropic/claude-opus-4.6',
+    'anthropic/claude-sonnet-4.6',
     'anthropic/claude-sonnet-4.5',
     'anthropic/claude-haiku-4.5',
   ];

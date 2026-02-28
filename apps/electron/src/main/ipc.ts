@@ -3133,7 +3133,21 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
         }
 
         let accessToken: string | undefined
-        if (source.config.mcp.authType === 'oauth' || source.config.mcp.authType === 'bearer') {
+        if (source.config.credentialProvider === 'nango' && source.config.nango) {
+          // Nango-backed sources: fetch token from Nango API
+          const { getNangoToken, isValidNangoSecretKey } = await import('@craft-agent/shared/sources')
+          const secretKey = process.env.NANGO_SECRET_KEY
+          if (secretKey && isValidNangoSecretKey(secretKey)) {
+            try {
+              const host = source.config.nango.host || process.env.NANGO_HOST
+              const result = await getNangoToken(source.config.nango, secretKey, host)
+              accessToken = result.accessToken
+            } catch (err) {
+              ipcLog.error(`Failed to get Nango token for ${sourceSlug}:`, err)
+            }
+          }
+        } else if (source.config.mcp.authType === 'oauth' || source.config.mcp.authType === 'bearer') {
+          // Local credential store
           const credentialManager = getCredentialManager()
           const credentialId = source.config.mcp.authType === 'oauth'
             ? { type: 'source_oauth' as const, workspaceId: source.workspaceId, sourceId: sourceSlug }

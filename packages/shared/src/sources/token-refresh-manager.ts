@@ -14,6 +14,7 @@
 import { isOAuthSource, type LoadedSource } from './types.ts';
 import type { SourceCredentialManager } from './credential-manager.ts';
 import { markSourceAuthenticated } from './storage.ts';
+import { getNangoToken, isValidNangoSecretKey } from './nango-provider.ts';
 
 /** Default cooldown after failed refresh (5 minutes) */
 const DEFAULT_COOLDOWN_MS = 5 * 60 * 1000;
@@ -36,8 +37,25 @@ export interface RefreshManagerOptions {
   log?: (message: string) => void;
 }
 
+/** Cached Nango token with expiry info */
+interface CachedNangoToken {
+  token: string;
+  /** When this token expires (Unix ms). Undefined = no known expiry (e.g. API_KEY). */
+  expiresAt?: number;
+  /** When we fetched this token (Unix ms) */
+  fetchedAt: number;
+}
+
+/** Refresh Nango tokens 5 minutes before expiry */
+const NANGO_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+
+/** For Nango tokens without expiry (e.g. API_KEY), re-fetch every 30 minutes */
+const NANGO_NO_EXPIRY_TTL_MS = 30 * 60 * 1000;
+
 export class TokenRefreshManager {
   private failedAttempts = new Map<string, number>();
+  /** Cached Nango tokens keyed by source slug */
+  private nangoTokenCache = new Map<string, CachedNangoToken>();
   private cooldownMs: number;
   private log: (message: string) => void;
   private credManager: SourceCredentialManager;
@@ -82,10 +100,93 @@ export class TokenRefreshManager {
   }
 
   /**
-   * Reset all rate limiting state (useful for testing).
+   * Fetch token from Nango API for Nango-backed sources.
+   * Bypasses all local credential storage and refresh logic.
+   *
+   * On success, restores auth state (same as local OAuth path) so the source
+   * can recover from transient failures without manual re-configuration.
+   */
+  /**
+   * Check if a cached Nango token is still fresh (not expired or about to expire).
+   */
+  private isNangoCacheFresh(cached: CachedNangoToken): boolean {
+    const now = Date.now();
+    if (cached.expiresAt) {
+      // Token has known expiry — use it until NANGO_REFRESH_BUFFER_MS before expiry
+      return now < cached.expiresAt - NANGO_REFRESH_BUFFER_MS;
+    }
+    // No expiry (e.g. API_KEY) — use TTL-based staleness
+    return now - cached.fetchedAt < NANGO_NO_EXPIRY_TTL_MS;
+  }
+
+  private async fetchNangoToken(source: LoadedSource): Promise<TokenRefreshResult> {
+    const slug = source.config.slug;
+
+    // Return cached token if still fresh — avoids hitting Nango rate limits.
+    const cached = this.nangoTokenCache.get(slug);
+    if (cached && this.isNangoCacheFresh(cached)) {
+      this.log(`[TokenRefresh] Using cached Nango token for ${slug}`);
+      return { success: true, token: cached.token };
+    }
+
+    const secretKey = process.env.NANGO_SECRET_KEY;
+
+    if (!secretKey) {
+      this.log(`[TokenRefresh] NANGO_SECRET_KEY not set for Nango source ${slug}`);
+      return {
+        success: false,
+        reason: 'NANGO_SECRET_KEY environment variable is not set',
+      };
+    }
+
+    // Fail fast if the key is not a UUID v4 — likely the Public Key, not Secret Key.
+    if (!isValidNangoSecretKey(secretKey)) {
+      const reason = 'NANGO_SECRET_KEY is not a UUID v4. This is likely the Nango Public Key, not the Secret Key. Check Nango dashboard → Settings → Secret Key.';
+      this.log(`[TokenRefresh] ${reason}`);
+      return { success: false, reason };
+    }
+
+    try {
+      const host = source.config.nango!.host || process.env.NANGO_HOST;
+      const result = await getNangoToken(
+        source.config.nango!,
+        secretKey,
+        host
+      );
+
+      this.log(`[TokenRefresh] Got Nango token for ${slug}`);
+      this.clearFailure(slug);
+
+      // Cache the token to avoid redundant Nango API calls
+      this.nangoTokenCache.set(slug, {
+        token: result.accessToken,
+        expiresAt: result.expiresAt,
+        fetchedAt: Date.now(),
+      });
+
+      // Restore auth state — ensures recovery after transient failures.
+      // Without this, a single failed fetch permanently disables the source
+      // because markSourceNeedsReauth persists isAuthenticated=false to disk.
+      markSourceAuthenticated(source.workspaceRootPath, source.config.slug);
+      source.config.isAuthenticated = true;
+      source.config.connectionStatus = 'connected';
+      source.config.connectionError = undefined;
+
+      return { success: true, token: result.accessToken };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.log(`[TokenRefresh] Nango fetch failed for ${slug}: ${reason}`);
+      this.recordFailure(slug);
+      return { success: false, reason };
+    }
+  }
+
+  /**
+   * Reset all rate limiting and cache state (useful for testing).
    */
   reset(): void {
     this.failedAttempts.clear();
+    this.nangoTokenCache.clear();
   }
 
   /**
@@ -111,6 +212,12 @@ export class TokenRefreshManager {
    * @returns Result with success status, token, or error reason
    */
   async ensureFreshToken(source: LoadedSource): Promise<TokenRefreshResult> {
+    // Nango-backed sources: fetch token directly from Nango API.
+    // Nango handles all token refresh server-side, so we bypass local credential logic entirely.
+    if (source.config.credentialProvider === 'nango' && source.config.nango) {
+      return this.fetchNangoToken(source);
+    }
+
     const slug = source.config.slug;
 
     // Check rate limiting
@@ -176,25 +283,37 @@ export class TokenRefreshManager {
   }
 
   /**
-   * Get all OAuth sources that need token refresh.
-   * Includes both MCP OAuth sources and API OAuth sources (Google, Slack, Microsoft).
+   * Get all sources that need token refresh.
+   * Includes:
+   * - MCP OAuth sources (e.g., Linear, Notion)
+   * - API OAuth sources (Google, Slack, Microsoft)
+   * - Nango-backed sources (any type — Nango handles refresh server-side)
    * Filters out sources in cooldown.
    */
   async getSourcesNeedingRefresh(sources: LoadedSource[]): Promise<LoadedSource[]> {
-    // Filter to OAuth sources (MCP OAuth + API OAuth providers)
-    const oauthSources = sources.filter(isOAuthSource);
+    // Filter to refreshable sources: OAuth sources + Nango-backed sources
+    const refreshableSources = sources.filter(s =>
+      isOAuthSource(s) || (s.config.credentialProvider === 'nango' && s.config.nango)
+    );
 
-    if (oauthSources.length === 0) {
+    if (refreshableSources.length === 0) {
       return [];
     }
 
     // Check each source in parallel
     const results = await Promise.all(
-      oauthSources.map(async (source) => {
+      refreshableSources.map(async (source) => {
         // Skip if in cooldown
         if (this.isInCooldown(source.config.slug)) {
           this.log(`[TokenRefresh] Skipping ${source.config.slug} - in cooldown`);
           return { source, needsRefresh: false };
+        }
+
+        // Nango sources: check if cached token is still fresh
+        if (source.config.credentialProvider === 'nango' && source.config.nango) {
+          const cached = this.nangoTokenCache.get(source.config.slug);
+          const needsRefresh = !cached || !this.isNangoCacheFresh(cached);
+          return { source, needsRefresh };
         }
 
         const needsRefresh = await this.needsRefresh(source);

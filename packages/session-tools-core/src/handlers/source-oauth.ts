@@ -20,6 +20,20 @@ import { successResponse, errorResponse } from '../response.ts';
 import { generateRequestId } from '../source-helpers.ts';
 import { basename } from 'node:path';
 
+/** Check if source uses Nango and return early message if so */
+function nangoGuardResponse(source: { slug?: string; credentialProvider?: string; nango?: { integrationId: string } }): ToolResult | null {
+  if (source.credentialProvider === 'nango' && source.nango) {
+    return {
+      content: [{ type: 'text', text:
+        `Source '${source.slug}' uses Nango for authentication (integrationId: ${source.nango.integrationId}). ` +
+        `Local auth is not needed. To switch to local auth, remove the credentialProvider and nango fields from the source config.`
+      }],
+      isError: false,
+    };
+  }
+  return null;
+}
+
 // ============================================================
 // MCP OAuth Trigger
 // ============================================================
@@ -43,6 +57,9 @@ export async function handleSourceOAuthTrigger(
   if (!source) {
     return errorResponse(`Source '${sourceSlug}' not found.`);
   }
+
+  const nangoGuard = nangoGuardResponse(source);
+  if (nangoGuard) return nangoGuard;
 
   if (source.type !== 'mcp') {
     return errorResponse(
@@ -96,6 +113,9 @@ export async function handleGoogleOAuthTrigger(
   if (!source) {
     return errorResponse(`Source '${sourceSlug}' not found.`);
   }
+
+  const nangoGuard = nangoGuardResponse(source);
+  if (nangoGuard) return nangoGuard;
 
   // Verify this is a Google source
   if (source.provider !== 'google') {
@@ -203,6 +223,9 @@ export async function handleSlackOAuthTrigger(
     return errorResponse(`Source '${sourceSlug}' not found.`);
   }
 
+  const nangoGuard = nangoGuardResponse(source);
+  if (nangoGuard) return nangoGuard;
+
   // Verify this is a Slack source
   if (source.provider !== 'slack') {
     const hint = !source.provider
@@ -291,6 +314,9 @@ export async function handleMicrosoftOAuthTrigger(
   if (!source) {
     return errorResponse(`Source '${sourceSlug}' not found.`);
   }
+
+  const nangoGuard = nangoGuardResponse(source);
+  if (nangoGuard) return nangoGuard;
 
   // Verify this is a Microsoft source
   if (source.provider !== 'microsoft') {

@@ -19,6 +19,7 @@ export type {
   SourceGuide,
   LoadedSource,
   CreateSourceInput,
+  NangoSourceConfig,
 } from './types.ts';
 
 // Constants and helpers
@@ -104,3 +105,7 @@ export type {
   TokenRefreshResult,
   RefreshManagerOptions,
 } from './token-refresh-manager.ts';
+
+// Nango Credential Provider (optional external token provider)
+export { getNangoToken, listNangoConnections, isValidNangoSecretKey } from './nango-provider.ts';
+export type { NangoTokenResult, NangoConnection } from './nango-provider.ts';

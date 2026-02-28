@@ -44,6 +44,17 @@ export async function handleCredentialPrompt(
     return errorResponse(`Source '${sourceSlug}' not found.`);
   }
 
+  // Nango-backed sources don't need local credentials
+  if (source.credentialProvider === 'nango' && source.nango) {
+    return {
+      content: [{ type: 'text', text:
+        `Source '${sourceSlug}' uses Nango for authentication (integrationId: ${source.nango.integrationId}). ` +
+        `Local credentials are not needed. To switch to local auth, remove the credentialProvider and nango fields from the source config.`
+      }],
+      isError: false,
+    };
+  }
+
   // Detect effective mode (auto-upgrades to multi-header if source has headerNames)
   const effectiveMode = detectCredentialMode(source, mode, headerNames);
   const effectiveHeaderNames = getEffectiveHeaderNames(source, headerNames);

@@ -155,6 +155,18 @@ export class SourceServerBuilder {
     const authType = apiConfig.authType;
     const provider = source.config.provider;
 
+    // Nango-backed API sources: always use token getter (Nango handles refresh server-side).
+    // This covers any provider (Google, Slack, Todoist, custom, etc.) when backed by Nango.
+    if (source.config.credentialProvider === 'nango' && source.config.nango) {
+      if (!source.config.isAuthenticated || !getToken) {
+        debug(`[SourceServerBuilder] Nango API source ${source.config.slug} not authenticated or missing token getter`);
+        return null;
+      }
+      debug(`[SourceServerBuilder] Building Nango-backed API server for ${source.config.slug}`);
+      const config = this.buildApiConfig(source);
+      return createApiServer(config, getToken, sessionPath, summarize);
+    }
+
     // Google APIs - use token getter with auto-refresh
     // Note: Direct isAuthenticated check is safe - Google OAuth always requires auth
     if (provider === 'google') {
@@ -164,8 +176,6 @@ export class SourceServerBuilder {
       }
       debug(`[SourceServerBuilder] Building Google API server for ${source.config.slug}`);
       const config = this.buildApiConfig(source);
-      // Pass the token getter function - it will be called before each request
-      // to get a fresh token (with auto-refresh if expired)
       return createApiServer(config, getToken, sessionPath, summarize);
     }
 
@@ -178,8 +188,6 @@ export class SourceServerBuilder {
       }
       debug(`[SourceServerBuilder] Building Slack API server for ${source.config.slug}`);
       const config = this.buildApiConfig(source);
-      // Pass the token getter function - it will be called before each request
-      // to get a fresh token (with auto-refresh if expired)
       return createApiServer(config, getToken, sessionPath, summarize);
     }
 
@@ -276,6 +284,11 @@ export class SourceServerBuilder {
           const server = await this.buildApiServer(source, credential ?? null, getToken, sessionPath, summarize);
           if (server) {
             apiServers[source.config.slug] = server;
+          } else if (source.config.credentialProvider === 'nango' && source.config.nango) {
+            errors.push({
+              sourceSlug: source.config.slug,
+              error: `Nango token fetch failed (integrationId: ${source.config.nango.integrationId}). Check NANGO_SECRET_KEY and Nango connection status.`,
+            });
           }
         }
       } catch (error) {

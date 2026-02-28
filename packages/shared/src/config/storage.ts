@@ -1253,42 +1253,42 @@ function backfillAllConnectionModels(config: StoredConfig): boolean {
 }
 
 /**
- * Migrate Opus 4.5 to Opus 4.6 for direct Anthropic connections (API key or OAuth).
- * Only applies to anthropic provider type (not compat), as third-party providers
- * like OpenRouter may not support the new model ID yet.
+ * Sync Anthropic connection models with the registry.
+ *
+ * For direct Anthropic connections (not compat/third-party), replaces the
+ * stored models array with the current ANTHROPIC_MODELS from the registry.
+ * This ensures new models (e.g., Sonnet 4.6) appear and removed models disappear
+ * without needing per-model migration functions.
+ *
+ * Preserves the user's defaultModel if it still exists in the registry;
+ * otherwise resets to the registry's first model.
  */
-function migrateOpus45ToOpus46(config: StoredConfig): boolean {
+function syncAnthropicModelsWithRegistry(config: StoredConfig): boolean {
   if (!config.llmConnections) return false;
 
-  const OPUS_45_ID = 'claude-opus-4-5-20251101';
-  const OPUS_46_ID = 'claude-opus-4-6';
+  const registryModels = getDefaultModelsForConnection('anthropic');
+  const registryIds = new Set(registryModels.map(m => typeof m === 'string' ? m : m.id));
 
   let changed = false;
 
   for (const connection of config.llmConnections) {
-    // Only migrate direct Anthropic connections (not compat/third-party)
+    // Only sync direct Anthropic connections (not compat/third-party)
     if (connection.providerType !== 'anthropic') continue;
 
-    // Migrate defaultModel
-    if (connection.defaultModel === OPUS_45_ID) {
-      connection.defaultModel = OPUS_46_ID;
-      changed = true;
-    }
+    // Check if stored models differ from registry
+    const storedIds = (connection.models ?? []).map(m => typeof m === 'string' ? m : m.id);
+    const registryIdList = [...registryIds];
+    const needsSync = storedIds.length !== registryIdList.length ||
+      storedIds.some((id, i) => id !== registryIdList[i]);
 
-    // Migrate models array
-    if (connection.models && Array.isArray(connection.models)) {
-      for (let i = 0; i < connection.models.length; i++) {
-        const model = connection.models[i];
-        if (typeof model === 'string' && model === OPUS_45_ID) {
-          connection.models[i] = OPUS_46_ID;
-          changed = true;
-        } else if (typeof model === 'object' && model.id === OPUS_45_ID) {
-          model.id = OPUS_46_ID;
-          if (model.name?.includes('4.5')) {
-            model.name = model.name.replace('4.5', '4.6');
-          }
-          changed = true;
-        }
+    if (needsSync) {
+      connection.models = registryModels;
+      changed = true;
+
+      // If defaultModel is no longer in registry, reset to first
+      if (connection.defaultModel && !registryIds.has(connection.defaultModel)) {
+        const first = registryModels[0];
+        connection.defaultModel = typeof first === 'string' ? first : first?.id;
       }
     }
   }
@@ -1467,8 +1467,8 @@ export function migrateLegacyLlmConnectionsConfig(): void {
     if (migrateModelDefaultsToConnections(config)) {
       needsSave = true;
     }
-    // Phase 1d: Migrate Opus 4.5 → Opus 4.6 for direct Anthropic connections
-    if (migrateOpus45ToOpus46(config)) {
+    // Phase 1d: Sync Anthropic connection models with registry (adds new models, removes stale ones)
+    if (syncAnthropicModelsWithRegistry(config)) {
       needsSave = true;
     }
     // Phase 1e: Migrate Opus 4.5 → Opus 4.6 in workspace default models

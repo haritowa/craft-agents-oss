@@ -6,10 +6,10 @@
  * - API OAuth sources (Google, Slack, Microsoft)
  */
 
-import { describe, test, expect, mock, beforeEach } from 'bun:test';
+import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import { isOAuthSource, type LoadedSource, type FolderSourceConfig } from '../types.ts';
 import { TokenRefreshManager } from '../token-refresh-manager.ts';
-import type { SourceCredentialManager } from '../credential-manager.ts';
+import { sourceNeedsAuthentication, type SourceCredentialManager } from '../credential-manager.ts';
 
 // Mock storage module to prevent disk I/O
 const mockMarkSourceAuthenticated = mock(() => true);
@@ -384,6 +384,45 @@ describe('TokenRefreshManager', () => {
       expect(result[0]!.config.slug).toBe('craft-mcp');
     });
 
+    test('includes Nango-backed source regardless of credential state', async () => {
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+
+      const source = createMockSource({
+        slug: 'todoist',
+        type: 'mcp',
+        provider: 'todoist',
+        mcp: { url: 'https://ai.todoist.net/mcp', authType: 'bearer' },
+        isAuthenticated: true,
+        credentialProvider: 'nango',
+        nango: { integrationId: 'todoist', connectionId: 'user-1' },
+      });
+
+      const result = await manager.getSourcesNeedingRefresh([source]);
+      expect(result.length).toBe(1);
+      expect(result[0]!.config.slug).toBe('todoist');
+      // Should NOT call credManager.load — Nango bypasses local credentials
+      expect(credManager.load).not.toHaveBeenCalled();
+    });
+
+    test('includes Nango-backed API source in refresh list', async () => {
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+
+      const source = createMockSource({
+        slug: 'exa',
+        type: 'api',
+        provider: 'exa',
+        api: { baseUrl: 'https://api.exa.ai', authType: 'bearer' },
+        isAuthenticated: true,
+        credentialProvider: 'nango',
+        nango: { integrationId: 'exa', connectionId: 'user-1' },
+      });
+
+      const result = await manager.getSourcesNeedingRefresh([source]);
+      expect(result.length).toBe(1);
+    });
+
     test('excludes source without refresh token', async () => {
       const credManager = createMockCredManager({
         load: mock(() => Promise.resolve({
@@ -509,5 +548,335 @@ describe('TokenRefreshManager', () => {
       expect(source.config.connectionError).toBeUndefined();
       expect(mockMarkSourceAuthenticated).toHaveBeenCalledWith('/mock/workspace', 'craft-mcp');
     });
+  });
+
+  describe('Nango credential provider', () => {
+    const originalFetch = globalThis.fetch;
+    let mockFetch: ReturnType<typeof mock>;
+    // Valid UUID v4 for tests (required by isValidNangoSecretKey validation)
+    const VALID_NANGO_KEY = 'a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5';
+
+    beforeEach(() => {
+      mockFetch = mock();
+      globalThis.fetch = mockFetch as any;
+      process.env.NANGO_SECRET_KEY = VALID_NANGO_KEY;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      delete process.env.NANGO_SECRET_KEY;
+      delete process.env.NANGO_HOST;
+    });
+
+    test('fetches token from Nango API for nango-backed source', async () => {
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          credentials: {
+            type: 'OAUTH2',
+            access_token: 'nango-fresh-token',
+            expires_at: '2026-03-01T12:00:00.000Z',
+          },
+        }), { status: 200 })
+      );
+
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        type: 'api',
+        provider: 'google',
+        api: { baseUrl: 'https://gmail.googleapis.com', authType: 'bearer' },
+        credentialProvider: 'nango',
+        nango: { integrationId: 'google-mail', connectionId: 'user-123' },
+        isAuthenticated: true,
+      });
+
+      const result = await manager.ensureFreshToken(source);
+
+      expect(result.success).toBe(true);
+      expect(result.token).toBe('nango-fresh-token');
+      expect(credManager.load).not.toHaveBeenCalled();
+      expect(credManager.refresh).not.toHaveBeenCalled();
+    });
+
+    test('restores auth state on successful Nango token fetch', async () => {
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          credentials: {
+            type: 'OAUTH2',
+            access_token: 'fresh-token',
+            expires_at: '2026-03-01T12:00:00.000Z',
+          },
+        }), { status: 200 })
+      );
+
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        slug: 'todoist',
+        type: 'mcp',
+        provider: 'todoist',
+        mcp: { url: 'https://ai.todoist.net/mcp', authType: 'bearer' },
+        credentialProvider: 'nango',
+        nango: { integrationId: 'todoist', connectionId: 'user-1' },
+        // Start with failed auth state (simulates recovery after transient failure)
+        isAuthenticated: false,
+        connectionStatus: 'needs_auth',
+        connectionError: 'Token missing or expired',
+      });
+
+      const result = await manager.ensureFreshToken(source);
+
+      expect(result.success).toBe(true);
+      expect(result.token).toBe('fresh-token');
+      // Auth state should be restored
+      expect(source.config.isAuthenticated).toBe(true);
+      expect(source.config.connectionStatus).toBe('connected');
+      expect(source.config.connectionError).toBeUndefined();
+      expect(mockMarkSourceAuthenticated).toHaveBeenCalledWith('/mock/workspace', 'todoist');
+    });
+
+    test('returns failure when Nango API returns error', async () => {
+      mockFetch.mockResolvedValueOnce(
+        new Response('{"error": "Connection not found"}', { status: 404 })
+      );
+
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        type: 'mcp',
+        provider: 'github',
+        mcp: { url: 'https://api.github.com/mcp', authType: 'bearer' },
+        credentialProvider: 'nango',
+        nango: { integrationId: 'github', connectionId: 'user-123' },
+        isAuthenticated: true,
+      });
+
+      const result = await manager.ensureFreshToken(source);
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toContain('Nango API error');
+    });
+
+    test('returns failure when NANGO_SECRET_KEY is not set', async () => {
+      delete process.env.NANGO_SECRET_KEY;
+
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        credentialProvider: 'nango',
+        nango: { integrationId: 'test', connectionId: 'user-1' },
+      });
+
+      const result = await manager.ensureFreshToken(source);
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toContain('NANGO_SECRET_KEY');
+    });
+
+    test('returns failure with clear message when NANGO_SECRET_KEY is not UUID v4', async () => {
+      process.env.NANGO_SECRET_KEY = 'not-a-uuid-public-key';
+
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        credentialProvider: 'nango',
+        nango: { integrationId: 'test', connectionId: 'user-1' },
+      });
+
+      const result = await manager.ensureFreshToken(source);
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toContain('not a UUID v4');
+      expect(result.reason).toContain('Secret Key');
+      // Should NOT call fetch — fail fast before network request
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    test('falls through to local logic when credentialProvider is not nango', async () => {
+      const credManager = createMockCredManager({
+        load: mock(() => Promise.resolve({
+          value: 'local-token',
+          expiresAt: Date.now() + 3600_000,
+        })),
+        isExpired: mock(() => false),
+        needsRefresh: mock(() => false),
+      });
+
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        type: 'api',
+        provider: 'google',
+        api: { baseUrl: 'https://gmail.googleapis.com', authType: 'bearer' },
+      });
+
+      const result = await manager.ensureFreshToken(source);
+
+      expect(result.success).toBe(true);
+      expect(result.token).toBe('local-token');
+      expect(credManager.load).toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    test('caches Nango token and reuses on subsequent calls', async () => {
+      // First call: fetch from Nango API
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          credentials: {
+            type: 'OAUTH2',
+            access_token: 'cached-token',
+            expires_at: new Date(Date.now() + 3600_000).toISOString(), // 1 hour from now
+          },
+        }), { status: 200 })
+      );
+
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        credentialProvider: 'nango',
+        nango: { integrationId: 'google-mail', connectionId: 'user-1' },
+      });
+
+      const result1 = await manager.ensureFreshToken(source);
+      expect(result1.success).toBe(true);
+      expect(result1.token).toBe('cached-token');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      // Second call: should use cache, no additional fetch
+      const result2 = await manager.ensureFreshToken(source);
+      expect(result2.success).toBe(true);
+      expect(result2.token).toBe('cached-token');
+      expect(mockFetch).toHaveBeenCalledTimes(1); // Still just 1 call
+    });
+
+    test('re-fetches Nango token when cache expires', async () => {
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        credentialProvider: 'nango',
+        nango: { integrationId: 'slack', connectionId: 'user-1' },
+      });
+
+      // First call: token that expires very soon (within refresh buffer)
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          credentials: {
+            type: 'OAUTH2',
+            access_token: 'old-token',
+            expires_at: new Date(Date.now() + 60_000).toISOString(), // Expires in 1 minute (within 5min buffer)
+          },
+        }), { status: 200 })
+      );
+
+      const result1 = await manager.ensureFreshToken(source);
+      expect(result1.token).toBe('old-token');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      // Second call: cache is stale (within refresh buffer), should re-fetch
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          credentials: {
+            type: 'OAUTH2',
+            access_token: 'fresh-token',
+            expires_at: new Date(Date.now() + 3600_000).toISOString(),
+          },
+        }), { status: 200 })
+      );
+
+      const result2 = await manager.ensureFreshToken(source);
+      expect(result2.token).toBe('fresh-token');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    test('reset() clears Nango token cache', async () => {
+      mockFetch.mockResolvedValue(
+        new Response(JSON.stringify({
+          credentials: {
+            type: 'OAUTH2',
+            access_token: 'token',
+            expires_at: new Date(Date.now() + 3600_000).toISOString(),
+          },
+        }), { status: 200 })
+      );
+
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        credentialProvider: 'nango',
+        nango: { integrationId: 'test', connectionId: 'user-1' },
+      });
+
+      await manager.ensureFreshToken(source);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      // Reset clears cache
+      manager.reset();
+
+      await manager.ensureFreshToken(source);
+      expect(mockFetch).toHaveBeenCalledTimes(2); // Fetched again after reset
+    });
+
+    test('uses NANGO_HOST env var when set', async () => {
+      process.env.NANGO_HOST = 'https://nango.mycompany.com';
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          credentials: {
+            type: 'OAUTH2',
+            access_token: 'self-hosted-token',
+            expires_at: '2026-03-01T12:00:00.000Z',
+          },
+        }), { status: 200 })
+      );
+
+      const credManager = createMockCredManager();
+      const manager = new TokenRefreshManager(credManager);
+      const source = createMockSource({
+        credentialProvider: 'nango',
+        nango: { integrationId: 'slack', connectionId: 'user-1' },
+      });
+
+      await manager.ensureFreshToken(source);
+
+      const [url] = mockFetch.mock.calls[0]!;
+      expect(url).toContain('nango.mycompany.com');
+    });
+  });
+});
+
+describe('sourceNeedsAuthentication with Nango', () => {
+  test('returns false for Nango-backed MCP source even when not locally authenticated', () => {
+    const source = createMockSource({
+      type: 'mcp',
+      provider: 'github',
+      mcp: { url: 'https://api.github.com/mcp', authType: 'bearer' },
+      credentialProvider: 'nango',
+      nango: { integrationId: 'github', connectionId: 'user-1' },
+      isAuthenticated: false,
+    });
+
+    expect(sourceNeedsAuthentication(source)).toBe(false);
+  });
+
+  test('returns false for Nango-backed API source even when not locally authenticated', () => {
+    const source = createMockSource({
+      type: 'api',
+      provider: 'google',
+      api: { baseUrl: 'https://gmail.googleapis.com', authType: 'bearer' },
+      credentialProvider: 'nango',
+      nango: { integrationId: 'google-mail', connectionId: 'user-1' },
+      isAuthenticated: false,
+    });
+
+    expect(sourceNeedsAuthentication(source)).toBe(false);
+  });
+
+  test('still returns true for non-Nango source that needs auth', () => {
+    const source = createMockSource({
+      type: 'mcp',
+      provider: 'github',
+      mcp: { url: 'https://api.github.com/mcp', authType: 'oauth' },
+      isAuthenticated: false,
+    });
+
+    expect(sourceNeedsAuthentication(source)).toBe(true);
   });
 });

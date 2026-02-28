@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 
 export const DOCKER_IMAGE = 'craft-agents-sandbox'
 export const CLAUDE_SDK_PATH_IN_CONTAINER = '/app/claude-agent-sdk/cli.js'
@@ -15,6 +15,9 @@ export function containerName(sessionId: string): string {
 export interface MountConfig {
   workingDirectory: string
   workspaceRootPath: string
+  /** App config directory (e.g., ~/.craft-agent). Mounted so the container can access
+   *  source configs, credentials, session data, docs, etc. */
+  configDir: string
   additionalMounts?: string[]
   /** Override for testing — defaults to os.homedir() */
   homeDir?: string
@@ -31,9 +34,9 @@ export interface MountConfig {
 function collectIdentityMounts(config: MountConfig): Set<string> {
   const mounts = new Set<string>()
 
-  // Working directory + app config dir (2 levels up from workspaceRootPath)
+  // Working directory + app config dir (explicit path, e.g. ~/.craft-agent)
   mounts.add(config.workingDirectory)
-  mounts.add(dirname(dirname(config.workspaceRootPath)))
+  mounts.add(config.configDir)
 
   if (config.additionalMounts) {
     for (const mount of config.additionalMounts) {
@@ -54,12 +57,16 @@ function collectIdentityMounts(config: MountConfig): Set<string> {
 function collectHomeMounts(home: string, containerHome: string): string[] {
   const flags: string[] = []
 
-  // Read-only config files (only if they exist on host)
-  for (const file of ['.claude.json', '.gitconfig']) {
-    const hostPath = join(home, file)
-    if (existsSync(hostPath)) {
-      flags.push('-v', `${hostPath}:${join(containerHome, file)}:ro`)
-    }
+  // .claude.json — writable (SDK CLI / Skill tool writes to it)
+  const claudeJson = join(home, '.claude.json')
+  if (existsSync(claudeJson)) {
+    flags.push('-v', `${claudeJson}:${join(containerHome, '.claude.json')}`)
+  }
+
+  // .gitconfig — read-only
+  const gitconfig = join(home, '.gitconfig')
+  if (existsSync(gitconfig)) {
+    flags.push('-v', `${gitconfig}:${join(containerHome, '.gitconfig')}:ro`)
   }
 
   // Writable ~/.claude/ — SDK CLI persists session data here
@@ -115,6 +122,8 @@ export interface DockerArgsConfig {
   sessionId: string
   workingDirectory: string
   workspaceRootPath: string
+  /** App config directory (e.g., ~/.craft-agent) */
+  configDir: string
   env: Record<string, string | undefined>
   imageName?: string
   innerExecutable: string
@@ -133,6 +142,7 @@ export function buildDockerArgs(config: DockerArgsConfig): string[] {
   const mountFlags = buildMountFlags({
     workingDirectory: config.workingDirectory,
     workspaceRootPath: config.workspaceRootPath,
+    configDir: config.configDir,
     additionalMounts: config.additionalMounts,
     homeDir: config.homeDir,
     globalAgentsDirExists: config.globalAgentsDirExists,

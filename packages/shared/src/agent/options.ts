@@ -5,6 +5,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync, mkdir
 import { spawn, spawnSync } from "child_process";
 import { debug } from "../utils/debug";
 import { buildDockerArgs, containerName, CLAUDE_SDK_PATH_IN_CONTAINER } from "./docker-env";
+import { CONFIG_DIR } from "../config/paths";
 
 declare const CRAFT_AGENT_CLI_VERSION: string | undefined;
 
@@ -276,7 +277,7 @@ function buildContainerEnv(
     envOverrides: Record<string, string> | undefined,
     remoteEnv: RemoteEnvContext,
 ): Record<string, string | undefined> {
-    const ALLOWED_KEYS = new Set(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CRAFT_DEBUG', 'CRAFT_SESSION_DIR', 'DEVBOX_USER_PROJECT']);
+    const ALLOWED_KEYS = new Set(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CRAFT_DEBUG', 'CRAFT_SESSION_DIR', 'DEVBOX_USER_PROJECT', 'NANGO_SECRET_KEY', 'NANGO_HOST']);
 
     if (envOverrides) {
         const droppedKeys = Object.keys(envOverrides).filter(k => !ALLOWED_KEYS.has(k));
@@ -292,6 +293,8 @@ function buildContainerEnv(
         CRAFT_DEBUG: resolveCraftDebug(),
         CRAFT_SESSION_DIR: envOverrides?.CRAFT_SESSION_DIR ?? process.env.CRAFT_SESSION_DIR,
         DEVBOX_USER_PROJECT: join(remoteEnv.workspaceRootPath, 'devbox'),
+        NANGO_SECRET_KEY: envOverrides?.NANGO_SECRET_KEY ?? process.env.NANGO_SECRET_KEY,
+        NANGO_HOST: envOverrides?.NANGO_HOST ?? process.env.NANGO_HOST,
     };
 }
 
@@ -391,6 +394,7 @@ function getDockerOptions(localOpts: Partial<Options>, envOverrides: Record<stri
         sessionId: remoteEnv.sessionId,
         workingDirectory: remoteEnv.workingDirectory,
         workspaceRootPath: remoteEnv.workspaceRootPath,
+        configDir: CONFIG_DIR,
         env: buildContainerEnv(envOverrides, remoteEnv),
         innerExecutable,
         innerArgs,

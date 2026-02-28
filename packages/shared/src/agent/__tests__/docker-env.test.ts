@@ -15,6 +15,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
     })
     expect(flags).toContain('-v')
     expect(flags).toContain('/home/user/project:/home/user/project')
@@ -24,6 +25,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
     })
     // Should mount the entire config dir so the agent can access docs/, config, etc.
     expect(flags).toContain('/home/user/.craft-agent:/home/user/.craft-agent')
@@ -35,6 +37,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       additionalMounts: ['/home/user/libs', '/home/user/.ssh'],
     })
     expect(flags).toContain('/home/user/libs:/home/user/libs')
@@ -45,6 +48,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       homeDir: '/home/user',
       globalAgentsDirExists: true,
     })
@@ -55,6 +59,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       homeDir: '/home/user',
       globalAgentsDirExists: false,
     })
@@ -66,6 +71,7 @@ describe('buildMountFlags', () => {
     expect(() => buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       additionalMounts: ['relative/path'],
     })).toThrow('additionalMount "relative/path" must be an absolute path')
   })
@@ -74,6 +80,7 @@ describe('buildMountFlags', () => {
     expect(() => buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       additionalMounts: ['./relative'],
     })).toThrow('additionalMount "./relative" must be an absolute path')
   })
@@ -82,6 +89,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       additionalMounts: ['/home/user/project'], // duplicate of workingDirectory
     })
     const mountPairs = flags.filter(f => f.includes(':/'))
@@ -89,7 +97,7 @@ describe('buildMountFlags', () => {
     expect(projectMounts.length).toBe(1)
   })
 
-  it('mounts ~/.claude.json to container home (read-only)', () => {
+  it('mounts ~/.claude.json to container home (writable for Skill tool)', () => {
     const tempHome = mkdtempSync(join(tmpdir(), 'docker-env-test-'))
     const claudeConfigPath = join(tempHome, '.claude.json')
     writeFileSync(claudeConfigPath, '{}')
@@ -97,15 +105,19 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       homeDir: tempHome,
     })
-    expect(flags).toContain(`${claudeConfigPath}:${join(CONTAINER_HOME, '.claude.json')}:ro`)
+    // Writable (no :ro) — SDK CLI / Skill tool needs to write to .claude.json
+    expect(flags).toContain(`${claudeConfigPath}:${join(CONTAINER_HOME, '.claude.json')}`)
+    expect(flags).not.toContain(`${claudeConfigPath}:${join(CONTAINER_HOME, '.claude.json')}:ro`)
   })
 
   it('mounts ~/.claude/ directory to container home (writable) for session persistence', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       homeDir: '/home/user',
       globalAgentsDirExists: false,
     })
@@ -118,6 +130,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       homeDir: '/home/user',
       globalAgentsDirExists: false,
     })
@@ -132,6 +145,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       homeDir: tempHome,
     })
     expect(flags).toContain(`${join(tempHome, '.gitconfig')}:${join(CONTAINER_HOME, '.gitconfig')}:ro`)
@@ -143,6 +157,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       homeDir: tempHome,
     })
     const hasGitConfig = flags.some(f => f.includes('.gitconfig'))
@@ -153,6 +168,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       homeDir: '/home/user',
       additionalMounts: ['/home/user/.agents'],
       globalAgentsDirExists: true,
@@ -170,6 +186,7 @@ describe('buildMountFlags', () => {
     const flags = buildMountFlags({
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       homeDir: tempHome,
     })
     const hasClaudeMount = flags.some(f => f.includes('.claude.json'))
@@ -266,6 +283,7 @@ describe('buildDockerArgs', () => {
       sessionId: 'sess-1',
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       env: { ANTHROPIC_API_KEY: 'sk-test' },
       imageName: 'craft-agents-sandbox',
       innerExecutable: 'bun',
@@ -293,6 +311,7 @@ describe('buildDockerArgs', () => {
       sessionId: 'sess-1',
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       env: {},
       imageName: 'craft-agents-sandbox',
       innerExecutable: 'bun',
@@ -308,6 +327,7 @@ describe('buildDockerArgs', () => {
       sessionId: 'sess-1',
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       env: {},
       imageName: 'craft-agents-sandbox',
       innerExecutable: 'bun',
@@ -321,6 +341,7 @@ describe('buildDockerArgs', () => {
       sessionId: 'sess-1',
       workingDirectory: '/tmp/project',
       workspaceRootPath: '/tmp/workspace',
+      configDir: '/tmp/config',
       env: {},
       innerExecutable: 'bun',
       innerArgs: [],
@@ -333,6 +354,7 @@ describe('buildDockerArgs', () => {
       sessionId: 'sess-1',
       workingDirectory: '/home/user/project',
       workspaceRootPath: '/home/user/.craft-agent/workspaces/ws1',
+      configDir: '/home/user/.craft-agent',
       env: {},
       innerExecutable: 'bun',
       innerArgs: [],

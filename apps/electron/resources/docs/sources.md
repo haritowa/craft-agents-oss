@@ -38,6 +38,18 @@ Example questions:
 > 2. Are there specific teams or projects you want to focus on?
 > 3. Should I set it up for read-only exploration or full access?"
 
+### 1.5. Check for Nango Connections (When Available)
+
+If `NANGO_SECRET_KEY` is set in the environment, **always check for matching Nango connections before proceeding with local OAuth**:
+
+1. Call `nango_list_connections` with a search matching the service name (e.g., "google", "slack", "github")
+2. If a matching connection exists, offer it to the user:
+   > "I found a Nango connection for Google Mail (integrationId: google-mail, connectionId: user-123). Would you like to use Nango for authentication? It handles token refresh automatically."
+3. If user accepts: set `credentialProvider: "nango"` in config.json with the matched connection details. Skip the auth trigger step entirely.
+4. If user declines or no match found: proceed with local OAuth as usual.
+
+**Why check Nango first:** Nango handles token refresh server-side, eliminating local refresh failures. If a connection already exists, it's the path of least friction.
+
 ### 2. Research the Service
 
 Use available tools to learn about the service:
@@ -123,6 +135,11 @@ The `source_test` tool:
 2. **Downloads and caches the icon** if a URL was provided
 3. **Tests the connection** to verify the source is reachable
 4. **Reports missing fields** (icon, tagline) that should be added
+
+For Nango-backed sources, `source_test` performs **full verification** — it calls the Nango API to fetch a token and confirms the connection is alive. If the test fails, check:
+- `NANGO_SECRET_KEY` is set and is the **Secret Key** (UUID v4 format), not the Public Key
+- The connection exists and is active in your Nango dashboard
+- The integrationId and connectionId match exactly
 
 After validation passes, trigger the appropriate auth flow:
 - OAuth sources: `source_oauth_trigger({ sourceSlug: "{slug}" })`
@@ -254,6 +271,13 @@ Each source folder contains:
   // For local sources:
   "local": {
     "path": "/path/to/folder"
+  },
+
+  // Nango credential provider (optional — skip local auth, use Nango):
+  "credentialProvider": "nango",  // "local" (default) or "nango"
+  "nango": {
+    "integrationId": "google-mail",  // Nango provider config key
+    "connectionId": "user-123"       // Nango connection ID
   },
 
   // Status (updated by source_test):
@@ -531,6 +555,81 @@ The `testEndpoint` specifies which endpoint to call when validating credentials:
 
 **Public APIs (authType: 'none')** don't require testEndpoint - we test by hitting the base URL.
 
+### Nango Credential Provider
+
+Any MCP or API source can use [Nango](https://nango.dev) for authentication instead of local OAuth or manual token entry. Nango manages token refresh server-side — the app fetches a fresh token on every request.
+
+**Requirements:**
+- `NANGO_SECRET_KEY` environment variable must be set
+- Optionally `NANGO_HOST` for self-hosted Nango instances
+- The connection must already exist in Nango (created via Nango's UI or API)
+
+**Add to any source's config.json:**
+```json
+{
+  "credentialProvider": "nango",
+  "nango": {
+    "integrationId": "google-mail",
+    "connectionId": "user-123"
+  }
+}
+```
+
+- `integrationId`: The Nango provider config key (e.g., `google-mail`, `slack`, `github`)
+- `connectionId`: The Nango connection ID (your user/entity identifier)
+
+**MCP source with Nango:**
+```json
+{
+  "id": "github_a1b2c3d4",
+  "name": "GitHub",
+  "slug": "github",
+  "enabled": true,
+  "provider": "github",
+  "type": "mcp",
+  "credentialProvider": "nango",
+  "nango": {
+    "integrationId": "github",
+    "connectionId": "user-123"
+  },
+  "mcp": {
+    "transport": "http",
+    "url": "https://api.githubcopilot.com/mcp/",
+    "authType": "bearer"
+  }
+}
+```
+
+**API source with Nango:**
+```json
+{
+  "id": "gmail_a1b2c3d4",
+  "name": "Gmail",
+  "slug": "gmail",
+  "enabled": true,
+  "provider": "google",
+  "type": "api",
+  "credentialProvider": "nango",
+  "nango": {
+    "integrationId": "google-mail",
+    "connectionId": "user-123"
+  },
+  "api": {
+    "baseUrl": "https://gmail.googleapis.com/",
+    "authType": "bearer",
+    "googleService": "gmail"
+  }
+}
+```
+
+**When using Nango:** Skip the auth trigger step (no `source_oauth_trigger` or `source_credential_prompt` needed). Nango handles authentication externally. Just run `source_test` to validate the config.
+
+**Nango tools:**
+- `nango_list_connections` — Lists all available Nango connections with their integrationId and connectionId. Use this to discover what connections exist instead of asking the user.
+- `nango_configure_source` — Configures an existing source to use Nango credentials. Pass the sourceSlug, integrationId, and connectionId.
+
+**When to use Nango:** If the user mentions Nango, or if `NANGO_SECRET_KEY` is set in the environment, offer Nango as an authentication option during source setup. Use `nango_list_connections` to discover available connections and propose values — do NOT ask the user to provide integrationId/connectionId manually.
+
 ### Local Sources
 
 Filesystem access for local folders.
@@ -737,6 +836,7 @@ Technical steps:
    - `source_slack_oauth_trigger` for Slack
    - `source_credential_prompt` for API keys/tokens
    - For basic auth with optional password: `source_credential_prompt({ mode: "basic", passwordRequired: false })`
+   - **Nango (preferred when available)**: If `NANGO_SECRET_KEY` is set, call `nango_list_connections` first. If a matching connection exists, call `nango_configure_source` — no local auth trigger needed. Nango handles refresh automatically.
 
 7. Confirm with user that the source is working as expected
 

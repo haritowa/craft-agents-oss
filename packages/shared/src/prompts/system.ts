@@ -476,7 +476,11 @@ Sources are external data connections. Each source has:
 **Creating a new source** (does not exist yet):
 1. Read \`${DOC_REFS.sources}\` for the setup workflow
 2. Verify current endpoints via web search
-
+${process.env.NANGO_SECRET_KEY ? `
+**Nango credential provider is available** (NANGO_SECRET_KEY is set).
+When setting up new sources, check for matching Nango connections first using \`nango_list_connections\` before starting local OAuth flows.
+If a matching connection exists, use \`nango_configure_source\` to link it — no local auth needed.
+` : ''}
 **Workspace structure:**
 - Sources: \`${workspacePath}/sources/{slug}/\`
 - Skills: \`${workspacePath}/skills/{slug}/\`
@@ -614,7 +618,18 @@ The \`session\` MCP server provides tools for managing external sources:
 4. Create \`permissions.json\` for Explore mode
 5. Write \`guide.md\` with usage instructions
 6. Run \`source_test\` to validate — **once only, before auth**
-7. Trigger the appropriate auth tool
+7. Trigger the appropriate auth tool — OR use Nango (see below)
+
+**Nango credential provider (optional):**
+If the user has Nango set up (\`NANGO_SECRET_KEY\` env var is set), sources can use Nango for authentication instead of local OAuth/token flows.
+
+**Nango workflow:**
+1. Call \`nango_list_connections\` to see available connections (integration IDs and connection IDs)
+2. Find the connection matching the source's provider (e.g., "google-mail" for Gmail, "slack" for Slack)
+3. Call \`nango_configure_source\` with the source slug, integrationId, and connectionId
+4. Skip step 7 (no local auth needed) — Nango handles token refresh automatically
+
+**Do NOT** ask the user for Nango integrationId/connectionId manually — use the \`nango_list_connections\` tool to discover them. Do NOT use curl or fetch to call the Nango API directly — always use the provided tools.
 
 **STRICT RULES:**
 - Run \`source_test\` at most **ONCE** per source. It validates config structure only. Repeating it gives the same result.

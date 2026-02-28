@@ -63,6 +63,7 @@ import {
   type MicrosoftService,
 } from '../sources/types.ts';
 import { isGoogleOAuthConfigured as isGoogleOAuthConfiguredImpl } from '../auth/google-oauth.ts';
+import { getNangoToken, isValidNangoSecretKey } from '../sources/nango-provider.ts';
 import { debug } from '../utils/debug.ts';
 import { getSessionPlansPath } from '../sessions/storage.ts';
 
@@ -216,6 +217,7 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
 
       const result = await validateMcpConnectionImpl({
         mcpUrl: config.url,
+        mcpAccessToken: config.token || undefined,
         claudeApiKey: apiKey || undefined,
         claudeOAuthToken: oauthToken || undefined,
       });
@@ -272,6 +274,57 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
     // MCP validation
     validateStdioMcpConnection,
     validateMcpConnection,
+
+    // Nango connection test
+    testNangoConnection: async (nangoConfig) => {
+      const secretKey = process.env.NANGO_SECRET_KEY;
+      if (!secretKey) {
+        return { success: false, error: 'NANGO_SECRET_KEY environment variable is not set' };
+      }
+      if (!isValidNangoSecretKey(secretKey)) {
+        return { success: false, error: 'NANGO_SECRET_KEY is not a valid UUID v4 — you may be using the Nango Public Key instead of the Secret Key' };
+      }
+      try {
+        const host = nangoConfig.host || process.env.NANGO_HOST;
+        const result = await getNangoToken(nangoConfig as any, secretKey, host);
+        return {
+          success: true,
+          credentialType: result.expiresAt ? 'OAUTH2' : 'API_KEY',
+          expiresAt: result.expiresAt ? new Date(result.expiresAt).toISOString() : undefined,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    },
+
+    // Source token getter — handles both local credentials and Nango
+    getSourceToken: async (sourceSlug: string): Promise<string | null> => {
+      const config = loadSourceConfigImpl(workspacePath, sourceSlug);
+      if (!config) return null;
+      const source: SharedLoadedSource = {
+        config: config as FolderSourceConfig,
+        guide: null,
+        folderPath: getSourcePath(workspacePath, sourceSlug),
+        workspaceRootPath: workspacePath,
+        workspaceId,
+      };
+      // Nango sources: fetch from Nango API
+      if (config.credentialProvider === 'nango' && config.nango) {
+        const secretKey = process.env.NANGO_SECRET_KEY;
+        if (!secretKey || !isValidNangoSecretKey(secretKey)) return null;
+        try {
+          const host = config.nango.host || process.env.NANGO_HOST;
+          const result = await getNangoToken(config.nango as any, secretKey, host);
+          return result.accessToken;
+        } catch {
+          return null;
+        }
+      }
+      // Local sources: use credential manager
+      const mgr = getSourceCredentialManager();
+      return mgr.getToken(source);
+    },
 
     // Icon helpers (simplified - full implementation would use logo.ts)
     isIconUrl: (value: string): boolean => {

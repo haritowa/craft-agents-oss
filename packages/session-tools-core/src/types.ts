@@ -276,6 +276,15 @@ export type ConnectionStatus = 'connected' | 'disconnected' | 'error' | 'unknown
 /**
  * Full source configuration (simplified version for core package)
  */
+/**
+ * Nango credential provider configuration (mirrors shared/sources/types.ts).
+ */
+export interface NangoSourceConfig {
+  integrationId: string;
+  connectionId: string;
+  host?: string;
+}
+
 export interface SourceConfig {
   id: string;
   name: string;
@@ -296,4 +305,7 @@ export interface SourceConfig {
   // Connection tracking
   connectionStatus?: ConnectionStatus;
   connectionError?: string;
+  // Nango credential provider (optional — when set, tokens come from Nango)
+  credentialProvider?: 'local' | 'nango';
+  nango?: NangoSourceConfig;
 }

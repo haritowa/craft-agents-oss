@@ -362,6 +362,24 @@ export interface SourceCardDefinition {
 }
 
 // ============================================================================
+// Nango Credential Provider
+// ============================================================================
+
+/**
+ * Nango credential provider configuration.
+ * When set on a source, tokens are fetched from Nango's REST API
+ * instead of the local encrypted credential store.
+ */
+export interface NangoSourceConfig {
+  /** Nango integration ID (provider config key), e.g., 'google-mail', 'slack', 'github' */
+  integrationId: string;
+  /** Nango connection ID (your user/entity identifier), e.g., 'user-123' */
+  connectionId: string;
+  /** Nango API host for self-hosted instances (defaults to https://nango.haritowa.work) */
+  host?: string;
+}
+
+// ============================================================================
 // Main Source Config
 // ============================================================================
 
@@ -399,6 +417,10 @@ export interface FolderSourceConfig {
 
   // Action card definitions this source supports
   cards?: SourceCardDefinition[];
+
+  // Nango credential provider (optional — when set, tokens come from Nango instead of local store)
+  credentialProvider?: 'local' | 'nango';
+  nango?: NangoSourceConfig;
 
   // Status tracking
   isAuthenticated?: boolean;

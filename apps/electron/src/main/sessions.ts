@@ -148,22 +148,45 @@ async function buildServersFromSources(
   const credManager = getSourceCredentialManager()
   const serverBuilder = getSourceServerBuilder()
 
-  // Load credentials for all sources
+  // Load credentials for all sources.
+  // Nango-backed sources fetch tokens from the Nango API instead of the local credential store.
   const sourcesWithCreds: SourceWithCredential[] = await Promise.all(
-    sources.map(async (source) => ({
-      source,
-      token: await credManager.getToken(source),
-      credential: await credManager.getApiCredential(source),
-    }))
+    sources.map(async (source) => {
+      // Nango sources: fetch token from Nango API via TokenRefreshManager
+      if (source.config.credentialProvider === 'nango' && source.config.nango) {
+        const manager = tokenRefreshManager ?? new TokenRefreshManager(credManager, {
+          log: (msg) => sessionLog.debug(msg),
+        })
+        const result = await manager.ensureFreshToken(source)
+        return {
+          source,
+          token: result.success ? result.token : null,
+          credential: null,
+        }
+      }
+      // Local sources: load from encrypted credential store
+      return {
+        source,
+        token: await credManager.getToken(source),
+        credential: await credManager.getApiCredential(source),
+      }
+    })
   )
   span.mark('credentials.loaded')
 
-  // Build token getter for OAuth sources (Google, Slack, Microsoft use OAuth)
-  // Uses TokenRefreshManager for unified refresh logic (DRY principle)
+  // Build token getter for OAuth and Nango sources that need auto-refresh.
+  // Uses TokenRefreshManager for unified refresh logic (DRY principle).
   const getTokenForSource = (source: LoadedSource) => {
+    // Nango-backed API sources: use TokenRefreshManager for on-demand token fetching
+    if (source.config.credentialProvider === 'nango' && source.config.nango) {
+      const manager = tokenRefreshManager ?? new TokenRefreshManager(credManager, {
+        log: (msg) => sessionLog.debug(msg),
+      })
+      return createTokenGetter(manager, source)
+    }
+    // OAuth API sources (Google, Slack, Microsoft)
     const provider = source.config.provider
     if (isApiOAuthProvider(provider)) {
-      // Use TokenRefreshManager if provided, otherwise create temporary one
       const manager = tokenRefreshManager ?? new TokenRefreshManager(credManager, {
         log: (msg) => sessionLog.debug(msg),
       })
