@@ -267,6 +267,12 @@ function SourceItem({ source, isSelected, isFirst, localMcpEnabled, onClick, onD
               )}>
                 {getSourceTypeLabel(config.type)}
               </span>
+              {/* Nango badge */}
+              {config.credentialProvider === 'nango' && (
+                <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/10 text-accent/70">
+                  Nango
+                </span>
+              )}
               {/* Status badge with tooltip showing connection error details on hover */}
               {statusBadge && (
                 <Tooltip>

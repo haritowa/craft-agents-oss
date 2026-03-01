@@ -638,10 +638,24 @@ async function testMcpConnection(
     if (ctx.validateStdioMcpConnection && source.mcp.command) {
       lines.push(`ℹ Testing stdio MCP: ${source.mcp.command}`);
       try {
+        // Build env: inject token into env var if tokenEnvVar is configured
+        // This handles both local credentials and Nango tokens for stdio servers
+        let env = source.mcp.env;
+        if (source.mcp.tokenEnvVar && ctx.getSourceToken) {
+          try {
+            const token = await ctx.getSourceToken(_sourceSlug);
+            if (token) {
+              env = { ...env, [source.mcp.tokenEnvVar]: token };
+            }
+          } catch {
+            // Token fetch failed — proceed without injection
+          }
+        }
+
         const result = await ctx.validateStdioMcpConnection({
           command: source.mcp.command,
           args: source.mcp.args || [],
-          env: source.mcp.env,
+          env,
         });
         if (result.success) {
           success = true;

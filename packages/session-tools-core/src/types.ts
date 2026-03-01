@@ -230,6 +230,8 @@ export interface McpSourceConfig {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Env var name to inject the auth token into for stdio servers (e.g., "GITHUB_TOKEN") */
+  tokenEnvVar?: string;
 }
 
 /**

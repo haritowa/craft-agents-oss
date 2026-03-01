@@ -59,6 +59,7 @@ export default function WorkspaceSettingsPage() {
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('ask')
   const [workingDirectory, setWorkingDirectory] = useState('')
   const [localMcpEnabled, setLocalMcpEnabled] = useState(true)
+  const [dockerEnabled, setDockerEnabled] = useState(false)
   const [isLoadingWorkspace, setIsLoadingWorkspace] = useState(true)
 
   // Default sources state
@@ -86,6 +87,7 @@ export default function WorkspaceSettingsPage() {
           setPermissionMode(settings.permissionMode || 'ask')
           setWorkingDirectory(settings.workingDirectory || '')
           setLocalMcpEnabled(settings.localMcpEnabled ?? true)
+          setDockerEnabled(settings.dockerEnabled ?? false)
           // Load cyclable permission modes from workspace settings
           if (settings.cyclablePermissionModes && settings.cyclablePermissionModes.length >= 2) {
             setEnabledModes(settings.cyclablePermissionModes)
@@ -266,6 +268,14 @@ export default function WorkspaceSettingsPage() {
     async (enabled: boolean) => {
       setLocalMcpEnabled(enabled)
       await updateWorkspaceSetting('localMcpEnabled', enabled)
+    },
+    [updateWorkspaceSetting]
+  )
+
+  const handleDockerEnabledChange = useCallback(
+    async (enabled: boolean) => {
+      setDockerEnabled(enabled)
+      await updateWorkspaceSetting('dockerEnabled', enabled)
     },
     [updateWorkspaceSetting]
   )
@@ -528,6 +538,12 @@ export default function WorkspaceSettingsPage() {
                   description="Enable stdio subprocess servers"
                   checked={localMcpEnabled}
                   onCheckedChange={handleLocalMcpEnabledChange}
+                />
+                <SettingsToggle
+                  label="Docker Sandbox"
+                  description="Run agent sessions in a Docker container"
+                  checked={dockerEnabled}
+                  onCheckedChange={handleDockerEnabledChange}
                 />
               </SettingsCard>
             </SettingsSection>

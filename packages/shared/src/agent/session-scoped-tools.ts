@@ -30,6 +30,8 @@ import { getSessionPlansPath, getSessionDataPath, getSessionPath } from '../sess
 import { debug } from '../utils/debug.ts';
 import { DOC_REFS } from '../docs/index.ts';
 import { createClaudeContext } from './claude-context.ts';
+import type { RemoteEnvContext } from './options.ts';
+import { containerName, CONTAINER_ENTRYPOINT } from './docker-env.ts';
 import { basename, join, normalize, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -487,7 +489,8 @@ async function handleTransformData(
     script: string;
     inputFiles: string[];
     outputFile: string;
-  }
+  },
+  remoteEnv?: RemoteEnvContext,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   const sessionDir = getSessionPath(workspaceRootPath, sessionId);
   const dataDir = getSessionDataPath(workspaceRootPath, sessionId);
@@ -525,20 +528,40 @@ async function handleTransformData(
     mkdirSync(dataDir, { recursive: true });
   }
 
-  // Write script to temp file
+  // Write script to temp file.
+  // When Docker sandbox is active, write to dataDir (bind-mounted into container)
+  // so `docker exec` can access it. For local execution, tmpdir() is fine.
   const ext = args.language === 'python3' ? '.py' : '.js';
-  const tempScript = join(tmpdir(), `craft-transform-${sessionId}-${Date.now()}${ext}`);
+  const tempScriptDir = remoteEnv?.enabled ? dataDir : tmpdir();
+  const tempScript = join(tempScriptDir, `craft-transform-${sessionId}-${Date.now()}${ext}`);
   writeFileSync(tempScript, args.script, 'utf-8');
 
   try {
-    // Build command
-    const cmd = args.language === 'python3' ? 'python3' : args.language;
-    const spawnArgs = [tempScript, ...resolvedInputs, resolvedOutput];
+    // Build command — this handler runs in the parent (Electron) process on
+    // the host. When Docker sandbox is active, wrap via `docker exec` so the
+    // script runs inside the container.
+    const langCmd = args.language === 'python3' ? 'python3' : args.language;
+    const langArgs = [tempScript, ...resolvedInputs, resolvedOutput];
 
     // Strip sensitive env vars
     const env = { ...process.env };
     for (const key of BLOCKED_ENV_VARS) {
       delete env[key];
+    }
+
+    let cmd: string;
+    let spawnArgs: string[];
+    let spawnEnv: Record<string, string | undefined>;
+    if (remoteEnv?.enabled) {
+      const name = containerName(remoteEnv.sessionId);
+      cmd = 'docker';
+      // Use entrypoint wrapper to activate devbox (adds runtimes to PATH)
+      spawnArgs = ['exec', name, CONTAINER_ENTRYPOINT, langCmd, ...langArgs];
+      spawnEnv = {}; // container has its own env
+    } else {
+      cmd = langCmd;
+      spawnArgs = langArgs;
+      spawnEnv = env;
     }
 
     // Spawn subprocess with manual timeout that escalates to SIGKILL.
@@ -547,7 +570,7 @@ async function handleTransformData(
     const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolvePromise, reject) => {
       const child = spawn(cmd, spawnArgs, {
         cwd: dataDir,
-        env,
+        env: spawnEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
@@ -832,6 +855,13 @@ async function handleNangoConfigureSource(
     'Tokens will now be fetched from Nango automatically on each request.',
   ];
 
+  // Hint about tokenEnvVar for stdio MCP sources that don't have it set
+  if (config.type === 'mcp' && config.mcp?.transport === 'stdio' && !config.mcp.tokenEnvVar) {
+    lines.push('');
+    lines.push('NOTE: This is a stdio MCP source. To inject the Nango token into the server\'s environment,');
+    lines.push('set `mcp.tokenEnvVar` in config.json to the env var name the server expects (e.g., "GITHUB_TOKEN").');
+  }
+
   debug('session-scoped-tools', `nango_configure_source: configured ${args.sourceSlug} with ${args.integrationId}/${args.connectionId}`);
   return { content: [{ type: 'text', text: lines.join('\n') }] };
 }
@@ -847,7 +877,8 @@ async function handleNangoConfigureSource(
 export function getSessionScopedTools(
   sessionId: string,
   workspaceRootPath: string,
-  workspaceId?: string
+  workspaceId?: string,
+  remoteEnv?: RemoteEnvContext
 ): ReturnType<typeof createSdkMcpServer> {
   const cacheKey = `${sessionId}::${workspaceRootPath}`;
 
@@ -871,6 +902,7 @@ export function getSessionScopedTools(
       const callbacks = getSessionScopedToolCallbacks(sessionId);
       callbacks?.onAuthRequest?.(request as AuthRequest);
     },
+    remoteEnv,
   });
 
   // Create tools using shared handlers
@@ -954,7 +986,7 @@ export function getSessionScopedTools(
 
     // transform_data
     tool('transform_data', TOOL_DESCRIPTIONS.transform_data, transformDataSchema, async (args) => {
-      return handleTransformData(sessionId, workspaceRootPath, args);
+      return handleTransformData(sessionId, workspaceRootPath, args, remoteEnv);
     }),
 
     // render_template (feature-flagged)

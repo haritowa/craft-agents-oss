@@ -470,7 +470,7 @@ Sources are external data connections. Each source has:
 
 **Using an existing source** (it already appears in \`<sources>\` above):
 1. Read its \`config.json\` and \`guide.md\` at \`${workspacePath}/sources/{slug}/\`
-2. If it needs auth, trigger the appropriate auth tool
+2. If it needs auth, check the **Auth tool reference** table below to pick the right auth tool for its type
 3. Call its tools directly — do not search the workspace for how to use it
 
 **Creating a new source** (does not exist yet):
@@ -479,7 +479,7 @@ Sources are external data connections. Each source has:
 ${process.env.NANGO_SECRET_KEY ? `
 **Nango credential provider is available** (NANGO_SECRET_KEY is set).
 When setting up new sources, check for matching Nango connections first using \`nango_list_connections\` before starting local OAuth flows.
-If a matching connection exists, use \`nango_configure_source\` to link it — no local auth needed.
+If a matching connection exists, use \`nango_configure_source\` to link it — this replaces local auth for any source type (MCP, API, stdio).
 ` : ''}
 **Workspace structure:**
 - Sources: \`${workspacePath}/sources/{slug}/\`
@@ -582,7 +582,6 @@ Windows (PowerShell) - use single quotes to avoid escaping issues:
 @('# Plan Title', '', '## Goal', 'Description', '', '## Steps', '1. Step one') | Out-File -FilePath '$PLANS_PATH\\my-plan.md' -Encoding utf8
 \`\`\`
 ` : ''}
-${backendName === 'Codex' ? `
 ## MCP Tool Naming
 
 MCP tools from connected sources follow the naming pattern \`mcp__{slug}__{tool}\`:
@@ -598,9 +597,70 @@ MCP tools from connected sources follow the naming pattern \`mcp__{slug}__{tool}
 
 **After OAuth completes:** MCP tools become available on the next turn. If tools were not available before auth, try calling them directly now — they will work after authentication. Do NOT keep running \`source_test\` to check — just call the tools.
 
-## Source Management Tools
+## Source Architecture & Authentication
 
-The \`session\` MCP server provides tools for managing external sources:
+Sources connect to external services via two main types, each with a different auth model:
+
+### MCP Sources (type: "mcp")
+
+**HTTP/SSE transport** (\`mcp.transport: "http" | "sse"\`):
+- Remote MCP server accessed via URL (\`mcp.url\`)
+- Auth config: \`mcp.authType: "oauth" | "bearer" | "none"\`
+- Token delivery: Injected as \`Authorization: Bearer <token>\` header at connection time
+- Token sources: Local OAuth (\`source_oauth_trigger\`), local bearer (\`source_credential_prompt\`), or Nango
+- Auto-refresh: Tokens are refreshed before each chat turn. Expired tokens trigger a full server rebuild with fresh credentials.
+
+**Stdio transport** (\`mcp.transport: "stdio"\`):
+- Local subprocess spawned via \`mcp.command\` + \`mcp.args\`
+- There is NO HTTP layer — tokens **cannot** be injected as headers
+- Token delivery: Via **environment variables** in \`mcp.env\`
+- When creating a stdio source that needs auth, set \`mcp.tokenEnvVar\` to the env var name the server expects. The system will inject the token (from local credentials or Nango) into that env var when spawning:
+  \`\`\`json
+  { "mcp": { "transport": "stdio", "command": "npx", "args": ["@github/mcp-server"], "tokenEnvVar": "GITHUB_TOKEN" } }
+  \`\`\`
+- You can also hardcode tokens directly in \`mcp.env\` if the user provides them, but \`tokenEnvVar\` is preferred because it integrates with credential management and Nango auto-refresh.
+- For Nango-backed stdio sources: after \`nango_configure_source\`, set \`mcp.tokenEnvVar\` to the correct env var name. The system fetches the token from Nango and injects it automatically at session start.
+- When Docker sandbox is active, stdio servers run inside the container automatically — no special config needed.
+
+### API Sources (type: "api")
+
+- Endpoint: \`api.baseUrl\` + OpenAPI-style tool definitions
+- Auth config: \`api.authType: "bearer" | "basic" | "header" | "query" | "none"\`
+- Token delivery: Injected dynamically into each API request via a token getter callback
+- Token sources: Local credential store (\`source_credential_prompt\`, OAuth triggers), or Nango
+- Auto-refresh: Token getter calls \`ensureFreshToken()\` on every request — handles both Nango and local OAuth refresh with in-memory caching
+
+### Auth tool reference
+
+| Source type | Auth scenario | Tool to use |
+|-------------|--------------|-------------|
+| MCP (http/sse) | OAuth (Linear, Notion, GitHub) | \`source_oauth_trigger\` |
+| MCP (http/sse) | Bearer token | \`source_credential_prompt\` |
+| MCP (stdio) | Token via env var | Set in \`mcp.env\` in config.json |
+| API | Google OAuth | \`source_google_oauth_trigger\` |
+| API | Slack OAuth | \`source_slack_oauth_trigger\` |
+| API | Microsoft OAuth | \`source_microsoft_oauth_trigger\` |
+| API | API key / bearer | \`source_credential_prompt\` |
+| Any type | Nango connection available | \`nango_configure_source\` (replaces local auth) |
+
+### Nango credential provider
+
+When \`NANGO_SECRET_KEY\` is set, sources can use Nango instead of local OAuth/token flows. Nango handles token storage, refresh, and rotation server-side.
+
+**Nango workflow:**
+1. Call \`nango_list_connections\` to discover available connections (integration IDs + connection IDs)
+2. Match the connection to the source's provider (e.g., "google-mail" for Gmail, "slack" for Slack)
+3. Call \`nango_configure_source\` with the source slug, integrationId, and connectionId
+4. No local auth needed — Nango manages tokens automatically
+
+**How Nango tokens reach each source type:**
+- **HTTP/SSE MCP**: Fetched from Nango API, injected as Bearer header (same path as local OAuth)
+- **API sources**: Token getter fetches from Nango on each request with 5-min cache + auto-refresh
+- **Stdio MCP**: Token fetched from Nango and injected into the server's environment variables
+
+Do NOT ask for integrationId/connectionId manually — use \`nango_list_connections\`. Do NOT use curl/fetch to call the Nango API — use the provided tools.
+
+## Source Management Tools
 
 | Tool | Purpose |
 |------|---------|
@@ -610,6 +670,8 @@ The \`session\` MCP server provides tools for managing external sources:
 | \`source_slack_oauth_trigger\` | Slack OAuth |
 | \`source_microsoft_oauth_trigger\` | Microsoft OAuth (Outlook, Teams, OneDrive) |
 | \`source_credential_prompt\` | Prompt user for API key / bearer token |
+| \`nango_list_connections\` | List available Nango connections (when NANGO_SECRET_KEY is set) |
+| \`nango_configure_source\` | Configure a source to use Nango credentials |
 
 **Source creation workflow:**
 1. Read \`${DOC_REFS.sources}\` for the full setup guide
@@ -618,18 +680,7 @@ The \`session\` MCP server provides tools for managing external sources:
 4. Create \`permissions.json\` for Explore mode
 5. Write \`guide.md\` with usage instructions
 6. Run \`source_test\` to validate — **once only, before auth**
-7. Trigger the appropriate auth tool — OR use Nango (see below)
-
-**Nango credential provider (optional):**
-If the user has Nango set up (\`NANGO_SECRET_KEY\` env var is set), sources can use Nango for authentication instead of local OAuth/token flows.
-
-**Nango workflow:**
-1. Call \`nango_list_connections\` to see available connections (integration IDs and connection IDs)
-2. Find the connection matching the source's provider (e.g., "google-mail" for Gmail, "slack" for Slack)
-3. Call \`nango_configure_source\` with the source slug, integrationId, and connectionId
-4. Skip step 7 (no local auth needed) — Nango handles token refresh automatically
-
-**Do NOT** ask the user for Nango integrationId/connectionId manually — use the \`nango_list_connections\` tool to discover them. Do NOT use curl or fetch to call the Nango API directly — always use the provided tools.
+7. Trigger the appropriate auth tool based on source type (see table above) — OR use Nango
 
 **STRICT RULES:**
 - Run \`source_test\` at most **ONCE** per source. It validates config structure only. Repeating it gives the same result.
@@ -638,7 +689,7 @@ If the user has Nango set up (\`NANGO_SECRET_KEY\` env var is set), sources can 
 - **If an existing source is already configured**, read its \`config.json\` + \`guide.md\`, then use it. Do not recreate or search for how to set it up.
 
 **If MCP connection fails after OAuth with "Auth required":** The source needs to be re-enabled in the session for the new credentials to take effect. Do NOT keep retrying the same failing call or investigating log files — ask the user to re-enable the source or restart the session.
-` : ''}
+
 **Full reference on what commands are enablled:** \`${DOC_REFS.permissions}\` (bash command lists, blocked constructs, planning workflow, customization). Read if unsure, or user has questions about permissions.
 
 ## Web Search

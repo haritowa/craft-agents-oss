@@ -144,6 +144,8 @@ export function deriveConnectionStatus(source: {
     type?: string
     mcp?: { authType?: string; transport?: string }
     api?: { authType?: string }
+    credentialProvider?: 'local' | 'nango'
+    nango?: { integrationId: string; connectionId: string }
   }
 }, localMcpEnabled = true): SourceConnectionStatus {
   // Check if this is a stdio source and local MCP is disabled
@@ -155,6 +157,11 @@ export function deriveConnectionStatus(source: {
   // If explicit status is set, use it
   if (source.config.connectionStatus) {
     return source.config.connectionStatus
+  }
+
+  // Nango-backed sources: connected if properly configured (Nango manages tokens externally)
+  if (source.config.credentialProvider === 'nango' && source.config.nango?.integrationId) {
+    return source.config.isAuthenticated ? 'connected' : 'needs_auth'
   }
 
   // Derive from auth state

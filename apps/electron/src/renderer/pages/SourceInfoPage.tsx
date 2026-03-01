@@ -430,6 +430,17 @@ export default function SourceInfoPage({ sourceSlug, workspaceId, onDelete }: So
                   </button>
                 </Info_Table.Row>
               )}
+              {/* Credential provider indicator */}
+              {source.config.credentialProvider === 'nango' && source.config.nango && (
+                <Info_Table.Row label="Credentials">
+                  <span className="text-sm">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/10 text-accent/70">Nango</span>
+                      <span className="text-foreground/60">{source.config.nango.integrationId} / {source.config.nango.connectionId}</span>
+                    </span>
+                  </span>
+                </Info_Table.Row>
+              )}
               <Info_Table.Row label="Last Tested" value={formatRelativeTime(source.config.lastTestedAt)} />
             </Info_Table>
           </Info_Section>

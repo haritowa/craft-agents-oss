@@ -66,6 +66,8 @@ import { isGoogleOAuthConfigured as isGoogleOAuthConfiguredImpl } from '../auth/
 import { getNangoToken, isValidNangoSecretKey } from '../sources/nango-provider.ts';
 import { debug } from '../utils/debug.ts';
 import { getSessionPlansPath } from '../sessions/storage.ts';
+import { isDockerAvailable, wrapStdioConfigForDocker } from './docker-env.ts';
+import type { RemoteEnvContext } from './options.ts';
 
 // Re-export types that may be needed by consumers
 export type { SessionToolContext, SessionToolCallbacks } from '@craft-agent/session-tools-core';
@@ -79,6 +81,8 @@ export interface ClaudeContextOptions {
   workspaceId: string;
   onPlanSubmitted: (planPath: string) => void;
   onAuthRequest: (request: unknown) => void;
+  /** When set, stdio MCP validation runs inside the Docker container via `docker exec` */
+  remoteEnv?: RemoteEnvContext;
 }
 
 /**
@@ -92,7 +96,7 @@ export interface ClaudeContextOptions {
  * - Icon management
  */
 export function createClaudeContext(options: ClaudeContextOptions): SessionToolContext {
-  const { sessionId, workspacePath, workspaceId, onPlanSubmitted, onAuthRequest } = options;
+  const { sessionId, workspacePath, workspaceId, onPlanSubmitted, onAuthRequest, remoteEnv } = options;
 
   // File system implementation
   const fs: FileSystemInterface = {
@@ -148,8 +152,9 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
         workspaceRootPath: source.workspaceRootPath,
         workspaceId: source.workspaceId,
       };
-      const token = await mgr.getToken(sharedSource);
-      return !!token;
+      // Use hasValidCredentials() which correctly handles Nango sources
+      // (returns true for Nango-backed sources since they manage tokens externally)
+      return mgr.hasValidCredentials(sharedSource);
     },
     getToken: async (source: LoadedSource): Promise<string | null> => {
       const mgr = getSourceCredentialManager();
@@ -178,7 +183,27 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
   // MCP validation
   const validateStdioMcpConnection = async (config: StdioMcpConfig): Promise<StdioValidationResult> => {
     try {
-      const result = await validateStdioMcpConnectionImpl(config);
+      // This handler runs in the parent (Electron) process on the host.
+      // When Docker sandbox is enabled AND Docker is available, wrap the
+      // command with `docker exec` so the validation runs inside the
+      // container — matching runtime behavior. The container must have
+      // /entrypoint.sh (activates devbox PATH) and the required runtimes.
+      // If Docker isn't available (e.g. devbox/codespace), fall back to
+      // local validation.
+      let effectiveConfig = config;
+      if (remoteEnv?.enabled && isDockerAvailable()) {
+        const wrapped = wrapStdioConfigForDocker(
+          { type: 'stdio', command: config.command, args: config.args, env: config.env },
+          remoteEnv.sessionId,
+        );
+        effectiveConfig = {
+          command: wrapped.command,
+          args: wrapped.args,
+          env: wrapped.env,
+        };
+      }
+
+      const result = await validateStdioMcpConnectionImpl(effectiveConfig);
       return {
         success: result.success,
         error: result.error,

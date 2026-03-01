@@ -48,6 +48,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { expandPath } from '../utils/paths.ts';
 import { extractWorkspaceSlug } from '../utils/workspace.ts';
+// wrapStdioServersForDocker is intentionally NOT used here — see setSourceServers() comment.
 import {
   ConfigWatcher,
   createConfigWatcher,
@@ -667,7 +668,7 @@ export class ClaudeAgent extends BaseAgent {
       const fullMcpServers: Options['mcpServers'] = {
         preferences: getPreferencesServer(false),
         // Session-scoped tools (SubmitPlan, source_test, etc.)
-        session: getSessionScopedTools(sessionId, this.workspaceRootPath),
+        session: getSessionScopedTools(sessionId, this.workspaceRootPath, undefined, this.config.remoteEnv),
         // Craft Agents documentation - always available for searching setup guides
         // This is a public Mintlify MCP server, no auth needed
         'craft-agents-docs': {
@@ -2293,6 +2294,13 @@ export class ClaudeAgent extends BaseAgent {
     apiServers: Record<string, unknown>,
     intendedSlugs?: string[]
   ): void {
+    // NOTE: We do NOT wrap stdio MCP configs with `docker exec` here.
+    // When remoteEnv is enabled, the SDK subprocess already runs inside the
+    // Docker container (via getDockerOptions/spawnClaudeCodeProcess). The
+    // subprocess spawns stdio MCP servers as child processes — which naturally
+    // run inside the same container. Wrapping with `docker exec` would create
+    // a Docker-in-Docker requirement that fails (no docker CLI in container).
+
     // Store server configs for SDK options building
     this.sourceMcpServers = mcpServers;
     this.sourceApiServers = apiServers as Record<string, ReturnType<typeof createSdkMcpServer>>;
@@ -2320,7 +2328,8 @@ export class ClaudeAgent extends BaseAgent {
 
   /**
    * Filter MCP servers based on whether local (stdio) MCP is enabled for this workspace.
-   * When local MCP is disabled, stdio servers are filtered out.
+   * When local MCP is disabled, stdio servers are filtered out — unless Docker sandbox
+   * is active, in which case stdio servers run inside the container (not locally).
    *
    * @returns Object with filtered servers and names of any skipped stdio servers
    */
@@ -2329,8 +2338,9 @@ export class ClaudeAgent extends BaseAgent {
   ): { servers: Record<string, SdkMcpServerConfig>; skipped: string[] } {
     const localEnabled = isLocalMcpEnabled(this.workspaceRootPath);
 
-    if (localEnabled) {
-      // Local MCP is enabled, return all servers
+    // When Docker sandbox is active, stdio servers run inside the container
+    // and are not affected by the local MCP setting.
+    if (localEnabled || this.config.remoteEnv?.enabled) {
       return { servers, skipped: [] };
     }
 

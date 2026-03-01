@@ -26,7 +26,7 @@ if [ -n "$DEVBOX_USER_PROJECT" ]; then
   # (common after container restart), shellenv outputs empty/wrong paths.
   # Running install first ensures all nix store refs are valid.
   # This is fast when packages are already in /nix (named volume).
-  devbox install -c "$DEVBOX_USER_PROJECT" 2>/dev/null || true
+  devbox install -c "$DEVBOX_USER_PROJECT" >/dev/null 2>/dev/null || true
 
   # Activate user-installed packages (noop if devbox.json has no packages yet)
   eval "$(devbox shellenv --pure=false -c "$DEVBOX_USER_PROJECT" 2>/dev/null)" || true

@@ -202,7 +202,8 @@ export class SourceManager {
           : sourceNeedsAuthentication(s)
             ? 'needs auth'
             : 'inactive';
-        return `${s.config.slug} (${reason})`;
+        const nangoTag = (s.config.credentialProvider === 'nango' && s.config.enabled) ? ', nango' : '';
+        return `${s.config.slug} (${reason}${nangoTag})`;
       });
       parts.push(`Inactive: ${inactiveList.join(', ')}`);
     }
@@ -318,6 +319,11 @@ export class SourceManager {
    */
   getAuthToolName(source: LoadedSource): string | null {
     const { type, provider, mcp, api } = source.config;
+
+    // Nango-managed sources handle auth externally — no local auth tool needed
+    if (source.config.credentialProvider === 'nango' && source.config.nango) {
+      return null;
+    }
 
     // MCP sources
     if (type === 'mcp') {

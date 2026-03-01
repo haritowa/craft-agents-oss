@@ -1743,6 +1743,7 @@ export function shouldAllowToolInMode(
         'mcp__session__source_test',
         'mcp__session__transform_data',
         'mcp__session__call_llm',
+        'mcp__session__nango_list_connections',
         ...(FEATURE_FLAGS.sourceTemplates ? ['mcp__session__render_template'] : []),
       ];
       if (readOnlySessionTools.includes(toolName)) {

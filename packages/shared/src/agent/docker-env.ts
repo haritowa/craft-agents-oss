@@ -1,12 +1,40 @@
 import { existsSync } from 'node:fs'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { SdkMcpServerConfig } from './backend/types'
+
+/**
+ * Check whether the `docker` CLI is available on the host.
+ * Cached after first call for the lifetime of the process.
+ */
+let _dockerAvailable: boolean | undefined
+export function isDockerAvailable(): boolean {
+  if (_dockerAvailable !== undefined) return _dockerAvailable
+  try {
+    execFileSync('docker', ['info'], { stdio: 'ignore', timeout: 5_000 })
+    _dockerAvailable = true
+  } catch {
+    _dockerAvailable = false
+  }
+  return _dockerAvailable
+}
 
 export const DOCKER_IMAGE = 'craft-agents-sandbox'
 export const CLAUDE_SDK_PATH_IN_CONTAINER = '/app/claude-agent-sdk/cli.js'
 /** Home directory of the `devbox` user inside the container image */
 export const CONTAINER_HOME = '/home/devbox'
+/**
+ * Path to the entrypoint script inside the container.
+ * Used as a wrapper for `docker exec` commands so that devbox is activated
+ * (adding runtimes like curl, node, python3, bun to PATH).
+ *
+ * `docker exec` does NOT run through the container's ENTRYPOINT — it starts
+ * a fresh process with the container's base env, which lacks devbox PATH
+ * entries. Prefixing with `/entrypoint.sh` re-activates devbox, then
+ * `exec "$@"` hands off to the actual command.
+ */
+export const CONTAINER_ENTRYPOINT = '/entrypoint.sh'
 
 export function containerName(sessionId: string): string {
   return `craft-agent-${sessionId}`
@@ -177,4 +205,52 @@ export async function stopContainer(sessionId: string): Promise<void> {
   return new Promise<void>((resolve) => {
     execFile('docker', ['stop', name], { stdio: 'ignore' } as any, () => resolve())
   })
+}
+
+/**
+ * Transform a stdio MCP server config to run inside the Docker container
+ * via `docker exec` instead of spawning directly on the host.
+ *
+ * Wraps with `/entrypoint.sh` so devbox is activated (runtimes in PATH).
+ * Without this, `docker exec` starts a process with the container's base
+ * env which lacks Nix/devbox PATH entries — causing "command not found"
+ * for tools like curl, node, python3.
+ */
+export function wrapStdioConfigForDocker(
+  config: Extract<SdkMcpServerConfig, { type: 'stdio' }>,
+  sessionId: string,
+): Extract<SdkMcpServerConfig, { type: 'stdio' }> {
+  const name = containerName(sessionId)
+  const envFlags = config.env ? buildEnvFlags(config.env) : []
+
+  return {
+    type: 'stdio',
+    command: 'docker',
+    args: [
+      'exec', '-i',
+      ...envFlags,
+      name,
+      CONTAINER_ENTRYPOINT,
+      config.command,
+      ...(config.args ?? []),
+    ],
+    env: {},
+  }
+}
+
+/**
+ * Wrap all stdio MCP server configs so they run inside the Docker container.
+ * HTTP/SSE configs pass through unchanged.
+ */
+export function wrapStdioServersForDocker(
+  servers: Record<string, SdkMcpServerConfig>,
+  sessionId: string,
+): Record<string, SdkMcpServerConfig> {
+  const result: Record<string, SdkMcpServerConfig> = {}
+  for (const [name, config] of Object.entries(servers)) {
+    result[name] = config.type === 'stdio'
+      ? wrapStdioConfigForDocker(config, sessionId)
+      : config
+  }
+  return result
 }

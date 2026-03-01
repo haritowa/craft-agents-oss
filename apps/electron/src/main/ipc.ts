@@ -1975,18 +1975,19 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
       thinkingLevel: config?.defaults?.thinkingLevel,
       workingDirectory: config?.defaults?.workingDirectory,
       localMcpEnabled: config?.localMcpServers?.enabled ?? true,
+      dockerEnabled: config?.remoteEnv?.enabled ?? false,
       defaultLlmConnection: config?.defaults?.defaultLlmConnection,
       enabledSourceSlugs: config?.defaults?.enabledSourceSlugs ?? [],
     }
   })
 
   // Update a workspace setting
-  // Valid keys: 'name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection'
+  // Valid keys: 'name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'dockerEnabled', 'defaultLlmConnection'
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_SETTINGS_UPDATE, async (_event, workspaceId: string, key: string, value: unknown) => {
     const workspace = getWorkspaceOrThrow(workspaceId)
 
     // Validate key is a known workspace setting
-    const validKeys = ['name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection']
+    const validKeys = ['name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'dockerEnabled', 'defaultLlmConnection']
     if (!validKeys.includes(key)) {
       throw new Error(`Invalid workspace setting key: ${key}. Valid keys: ${validKeys.join(', ')}`)
     }
@@ -2012,6 +2013,10 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
       // Store in localMcpServers.enabled (top-level, not in defaults)
       config.localMcpServers = config.localMcpServers || { enabled: true }
       config.localMcpServers.enabled = Boolean(value)
+    } else if (key === 'dockerEnabled') {
+      // Store in remoteEnv.enabled (top-level, not in defaults)
+      config.remoteEnv = config.remoteEnv || { enabled: false }
+      config.remoteEnv.enabled = Boolean(value)
     } else {
       // Update the setting in defaults
       config.defaults = config.defaults || {}

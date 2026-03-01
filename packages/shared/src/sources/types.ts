@@ -249,6 +249,13 @@ export interface McpSourceConfig {
    * Environment variables for the spawned process.
    */
   env?: Record<string, string>;
+
+  /**
+   * Name of the environment variable to inject the auth token into for stdio servers.
+   * When set, the system injects the token (from local credentials or Nango) as this
+   * env var when spawning the server. Example: "GITHUB_TOKEN", "SLACK_BOT_TOKEN".
+   */
+  tokenEnvVar?: string;
 }
 
 /**

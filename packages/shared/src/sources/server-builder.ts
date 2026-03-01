@@ -94,11 +94,21 @@ export class SourceServerBuilder {
         debug(`[SourceServerBuilder] Stdio source ${source.config.slug} missing command`);
         return null;
       }
+
+      // Build env: start with static config, then inject token if tokenEnvVar is set.
+      // This handles both local credentials and Nango tokens for stdio servers that
+      // need auth via environment variables (e.g., GITHUB_TOKEN, SLACK_BOT_TOKEN).
+      let env = mcp.env;
+      if (token && mcp.tokenEnvVar) {
+        env = { ...env, [mcp.tokenEnvVar]: token };
+        debug(`[SourceServerBuilder] Injected token into env.${mcp.tokenEnvVar} for ${source.config.slug}`);
+      }
+
       return {
         type: 'stdio',
         command: mcp.command,
         args: mcp.args,
-        env: mcp.env,
+        env,
       };
     }
 

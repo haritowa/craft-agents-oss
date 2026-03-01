@@ -4,9 +4,21 @@
     "bun@latest",
     "nodejs@22",
     "python@3.13",
+    "uv@latest",
     "git@latest",
     "ripgrep@latest",
     "jq@latest",
-    "curl@latest"
+    "curl@latest",
+    "fd@latest",
+    "bat@latest",
+    "eza@latest",
+    "delta@latest",
+    "fzf@latest",
+    "yq-go@latest",
+    "miller@latest",
+    "unzip@latest",
+    "tree@latest",
+    "mlocate@latest",
+    "httpie@latest"
   ]
 }
