@@ -138,6 +138,9 @@ describe('extractToolStarts', () => {
     toolIndex = new ToolIndex()
     emittedIds = new Set()
     resetCounters()
+    // Clear global metadata store to prevent cross-test contamination
+    // (e.g., unified-network-interceptor.sse.test.ts writes metadata for 'toolu_1')
+    toolMetadataStore._clearForTesting()
   })
 
   it('extracts a single tool_start from one tool_use block', () => {

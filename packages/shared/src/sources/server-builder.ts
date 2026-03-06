@@ -94,11 +94,20 @@ export class SourceServerBuilder {
         debug(`[SourceServerBuilder] Stdio source ${source.config.slug} missing command`);
         return null;
       }
+      // Build env: start with static config, then inject token if tokenEnvVar is set.
+      // This handles both local credentials and Nango tokens for stdio servers that
+      // need auth via environment variables (e.g., GITHUB_TOKEN, SLACK_BOT_TOKEN).
+      let env = mcp.env;
+      if (token && mcp.tokenEnvVar) {
+        env = { ...env, [mcp.tokenEnvVar]: token };
+        debug(`[SourceServerBuilder] Injected token into env.${mcp.tokenEnvVar} for ${source.config.slug}`);
+      }
+
       return {
         type: 'stdio',
         command: mcp.command,
         args: mcp.args,
-        env: mcp.env,
+        env,
       };
     }
 
@@ -154,6 +163,18 @@ export class SourceServerBuilder {
     const apiConfig = source.config.api;
     const authType = apiConfig.authType;
     const provider = source.config.provider;
+
+    // Nango-backed API sources: always use token getter (Nango handles refresh server-side).
+    // This covers any provider (Google, Slack, Todoist, custom, etc.) when backed by Nango.
+    if (source.config.credentialProvider === 'nango' && source.config.nango) {
+      if (!source.config.isAuthenticated || !getToken) {
+        debug(`[SourceServerBuilder] Nango API source ${source.config.slug} not authenticated or missing token getter`);
+        return null;
+      }
+      debug(`[SourceServerBuilder] Building Nango-backed API server for ${source.config.slug}`);
+      const config = this.buildApiConfig(source);
+      return createApiServer(config, getToken, sessionPath, summarize);
+    }
 
     // Google APIs - use token getter with auto-refresh
     // Note: Direct isAuthenticated check is safe - Google OAuth always requires auth

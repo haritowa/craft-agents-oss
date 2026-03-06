@@ -104,3 +104,13 @@ export type {
   TokenRefreshResult,
   RefreshManagerOptions,
 } from './token-refresh-manager.ts';
+
+// Nango credential provider
+export {
+  getNangoToken,
+  listNangoConnections,
+  isValidNangoSecretKey,
+} from './nango-provider.ts';
+
+// Nango types
+export type { NangoSourceConfig } from './types.ts';

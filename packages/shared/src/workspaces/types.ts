@@ -18,6 +18,15 @@ import type { ThinkingLevel } from '../agent/thinking-levels.ts';
  * Local MCP server configuration
  * Controls whether stdio-based (local subprocess) MCP servers can be spawned.
  */
+export interface RemoteEnvConfig {
+  /** Enable running agent in Docker container */
+  enabled: boolean
+  /** Extra host paths to bind-mount into the container (at identical paths) */
+  additionalMounts?: string[]
+  /** Docker network name for cross-container communication */
+  network?: string
+}
+
 export interface LocalMcpConfig {
   /**
    * Whether local (stdio) MCP servers are enabled for this workspace.
@@ -56,6 +65,9 @@ export interface WorkspaceConfig {
    * Resolution order: ENV (CRAFT_LOCAL_MCP_ENABLED) > workspace config > default (true)
    */
   localMcpServers?: LocalMcpConfig;
+
+  /** Remote environment config for Docker sandbox */
+  remoteEnv?: RemoteEnvConfig
 
   createdAt: number;
   updatedAt: number;

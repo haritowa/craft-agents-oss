@@ -1,10 +1,32 @@
-import type { Options } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, SpawnOptions, SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 import { join, dirname } from "path";
 import { homedir } from "os";
-import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync, mkdirSync } from "fs";
+import { spawn } from "child_process";
 import { debug } from "../utils/debug";
+import { ensureContainer, buildExecArgs, containerName, CLAUDE_SDK_PATH_IN_CONTAINER, type DockerArgsConfig } from "./docker-env";
+import { CONFIG_DIR } from "../config/paths";
 
 declare const CRAFT_AGENT_CLI_VERSION: string | undefined;
+
+/** Sensitive env var patterns — values are redacted in debug logs */
+const SENSITIVE_ENV_PATTERNS = /TOKEN|SECRET|KEY|AUTH|PASSWORD|CREDENTIAL/i;
+
+/** Redact sensitive `-e KEY=VALUE` flags in docker args for safe logging */
+function redactDockerArgs(args: string[]): string[] {
+    return args.map((arg, i) => {
+        if (i === 0 || args[i - 1] !== '-e') return arg;
+        const eq = arg.indexOf('=');
+        if (eq === -1) return arg;
+        const key = arg.substring(0, eq);
+        return SENSITIVE_ENV_PATTERNS.test(key) ? `${key}=***` : arg;
+    });
+}
+
+/** Resolve CRAFT_DEBUG flag from argv or env (once per call, avoids repeated argv scanning) */
+function resolveCraftDebug(): '1' | '0' {
+    return (process.argv.includes('--debug') || process.env.CRAFT_DEBUG === '1') ? '1' : '0';
+}
 
 let customPathToClaudeCodeExecutable: string | null = null;
 let customInterceptorPath: string | null = null;
@@ -14,6 +36,15 @@ let claudeConfigChecked = false;
 // UTF-8 BOM character — Windows editors/processes sometimes prepend this to files.
 // JSON parsers reject BOM, but the file content after BOM may be valid JSON.
 const UTF8_BOM = '\uFEFF';
+
+export interface RemoteEnvContext {
+    enabled: boolean
+    sessionId: string
+    workingDirectory: string
+    workspaceRootPath: string
+    network?: string
+    additionalMounts?: string[]
+}
 
 /**
  * Ensure ~/.claude.json exists and contains valid, BOM-free JSON before
@@ -176,17 +207,10 @@ export function setExecutable(path: string) {
 }
 
 /**
- * Get default SDK options for spawning the Claude Code subprocess.
- *
- * @param envOverrides - Per-session environment variable overrides.
- *   These are spread AFTER process.env so they take precedence.
- *   Used to pass per-session config like ANTHROPIC_BASE_URL that would
- *   otherwise be clobbered by concurrent sessions mutating process.env.
+ * Resolve the local executable, args, and env for the Claude Code subprocess.
+ * This handles the three existing branches: custom path, versioned CLI, and fallback.
  */
-export function getDefaultOptions(envOverrides?: Record<string, string>): Partial<Options> {
-    // Repair corrupted ~/.claude.json before the SDK subprocess reads it
-    ensureClaudeConfig();
-
+function getLocalOptions(envOverrides?: Record<string, string>): Partial<Options> {
     // SECURITY: Disable Bun's automatic .env file loading in the SDK subprocess.
     // Without this, Bun loads .env from the subprocess cwd (user's working directory),
     // which can inject ANTHROPIC_API_KEY and override our OAuth auth — silently charging
@@ -211,8 +235,7 @@ export function getDefaultOptions(envOverrides?: Record<string, string>): Partia
             env: {
                 ...process.env,
                 ...envOverrides,
-                // Propagate debug mode from argv flag OR existing env var
-                CRAFT_DEBUG: (process.argv.includes('--debug') || process.env.CRAFT_DEBUG === '1') ? '1' : '0',
+                CRAFT_DEBUG: resolveCraftDebug(),
             }
         };
     }
@@ -231,8 +254,7 @@ export function getDefaultOptions(envOverrides?: Record<string, string>): Partia
                 ...process.env,
                 BUN_BE_BUN: '1',
                 ...envOverrides,
-                // Propagate debug mode from argv flag OR existing env var
-                CRAFT_DEBUG: (process.argv.includes('--debug') || process.env.CRAFT_DEBUG === '1') ? '1' : '0',
+                CRAFT_DEBUG: resolveCraftDebug(),
             }
         }
     }
@@ -241,8 +263,154 @@ export function getDefaultOptions(envOverrides?: Record<string, string>): Partia
         env: {
             ...process.env,
             ...envOverrides,
-            // Propagate debug mode from argv flag OR existing env var
-            CRAFT_DEBUG: (process.argv.includes('--debug') || process.env.CRAFT_DEBUG === '1') ? '1' : '0',
+            CRAFT_DEBUG: resolveCraftDebug(),
         }
     };
+}
+
+/**
+ * Build the allowlisted env vars to forward into the Docker container.
+ * HOME is NOT forwarded — the container uses its native HOME (/home/devbox).
+ */
+function buildContainerEnv(
+    envOverrides: Record<string, string> | undefined,
+    remoteEnv: RemoteEnvContext,
+): Record<string, string | undefined> {
+    const ALLOWED_KEYS = new Set(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CRAFT_DEBUG', 'CRAFT_SESSION_DIR', 'DEVBOX_USER_PROJECT', 'NANGO_SECRET_KEY', 'NANGO_HOST']);
+
+    if (envOverrides) {
+        const droppedKeys = Object.keys(envOverrides).filter(k => !ALLOWED_KEYS.has(k));
+        if (droppedKeys.length > 0) {
+            console.warn('[docker-env] Dropping non-allowlisted envOverrides:', droppedKeys);
+        }
+    }
+
+    return {
+        ANTHROPIC_API_KEY: envOverrides?.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY,
+        CLAUDE_CODE_OAUTH_TOKEN: envOverrides?.CLAUDE_CODE_OAUTH_TOKEN ?? process.env.CLAUDE_CODE_OAUTH_TOKEN,
+        ANTHROPIC_BASE_URL: envOverrides?.ANTHROPIC_BASE_URL ?? process.env.ANTHROPIC_BASE_URL,
+        CRAFT_DEBUG: resolveCraftDebug(),
+        CRAFT_SESSION_DIR: envOverrides?.CRAFT_SESSION_DIR ?? process.env.CRAFT_SESSION_DIR,
+        DEVBOX_USER_PROJECT: join(remoteEnv.workspaceRootPath, 'devbox'),
+        NANGO_SECRET_KEY: envOverrides?.NANGO_SECRET_KEY ?? process.env.NANGO_SECRET_KEY,
+        NANGO_HOST: envOverrides?.NANGO_HOST ?? process.env.NANGO_HOST,
+    };
+}
+
+/**
+ * Pre-create directories that Docker would otherwise create as root-owned,
+ * making them unwritable by the non-root container user.
+ */
+function ensureDockerMountDirs(workspaceRootPath: string): void {
+    mkdirSync(join(homedir(), '.claude'), { recursive: true });
+    mkdirSync(join(workspaceRootPath, 'devbox'), { recursive: true });
+}
+
+/** Extract --preload file paths from executable args so their parent dirs can be bind-mounted. */
+function extractPreloadMounts(args: string[]): string[] {
+    const mounts: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--preload' && i + 1 < args.length) {
+            mounts.push(dirname(args[i + 1]!));
+        }
+    }
+    return mounts;
+}
+
+/** Pipe Docker stderr to debug log (SDK's SpawnedProcess interface doesn't expose stderr). */
+function captureDockerStderr(proc: ReturnType<typeof spawn>): void {
+    proc.stderr?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString().trim();
+        if (text) {
+            debug(`[docker-env stderr] ${text}`);
+            console.error(`[docker-env stderr] ${text}`);
+        }
+    });
+}
+
+/**
+ * Create a spawnClaudeCodeProcess function that runs the SDK inside Docker.
+ *
+ * Uses a persistent container model:
+ * 1. ensureContainer() starts a detached container with `sleep infinity` (idempotent)
+ * 2. Each SDK invocation uses `docker exec -i` to run inside the existing container
+ *
+ * This keeps background tasks (e.g. `npm run dev &`) alive between agent turns.
+ */
+function createDockerSpawner(containerConfig: DockerArgsConfig, env: Record<string, string | undefined>, innerExecutable: string, innerArgs: string[]): (opts: SpawnOptions) => SpawnedProcess {
+    return (sdkSpawnOpts: SpawnOptions): SpawnedProcess => {
+        const sessionId = containerConfig.sessionId;
+        const name = containerName(sessionId);
+
+        // Ensure the persistent container is running (no-op if already up)
+        ensureContainer(containerConfig);
+
+        // Build `docker exec` args for this SDK invocation
+        const execArgs = buildExecArgs(sessionId, env, innerExecutable, [...innerArgs, ...sdkSpawnOpts.args]);
+        debug(`[docker-env] Exec in container: docker ${redactDockerArgs(execArgs).join(' ')}`);
+
+        const proc = spawn('docker', execArgs, {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            signal: sdkSpawnOpts.signal,
+        });
+
+        // Don't stop the container on abort — only kill the exec process.
+        // The container stays alive for background tasks.
+        captureDockerStderr(proc);
+
+        return {
+            stdin: proc.stdin,
+            stdout: proc.stdout,
+            get killed() { return proc.killed; },
+            get exitCode() { return proc.exitCode; },
+            kill(signal: NodeJS.Signals) { return proc.kill(signal); },
+            on(event: string, listener: (...args: any[]) => void) { proc.on(event, listener); },
+            once(event: string, listener: (...args: any[]) => void) { proc.once(event, listener); },
+            off(event: string, listener: (...args: any[]) => void) { proc.off(event, listener); },
+        };
+    };
+}
+
+/** Build SDK options that run the Claude Code subprocess inside a Docker container. */
+function getDockerOptions(localOpts: Partial<Options>, envOverrides: Record<string, string> | undefined, remoteEnv: RemoteEnvContext): Partial<Options> {
+    const innerExecutable = (localOpts.executable ?? 'bun') as string;
+    const innerArgs = [...(localOpts.executableArgs ?? [])];
+    const preloadMounts = extractPreloadMounts(innerArgs);
+
+    ensureDockerMountDirs(remoteEnv.workspaceRootPath);
+
+    const containerEnv = buildContainerEnv(envOverrides, remoteEnv);
+
+    // Config for the persistent container (docker run -d sleep infinity)
+    const containerConfig: DockerArgsConfig = {
+        sessionId: remoteEnv.sessionId,
+        workingDirectory: remoteEnv.workingDirectory,
+        workspaceRootPath: remoteEnv.workspaceRootPath,
+        configDir: CONFIG_DIR,
+        env: containerEnv,
+        innerExecutable, // not used for container run (sleep infinity), but needed for type
+        innerArgs,       // same
+        network: remoteEnv.network,
+        additionalMounts: [...(remoteEnv.additionalMounts ?? []), ...preloadMounts],
+    };
+
+    return {
+        spawnClaudeCodeProcess: createDockerSpawner(containerConfig, containerEnv, innerExecutable, innerArgs),
+        pathToClaudeCodeExecutable: CLAUDE_SDK_PATH_IN_CONTAINER,
+    };
+}
+
+/**
+ * Get default SDK options for spawning the Claude Code subprocess.
+ *
+ * @param envOverrides - Per-session env var overrides (take precedence over process.env).
+ * @param remoteEnv - When enabled, the subprocess runs inside a Docker container.
+ */
+export function getDefaultOptions(
+    envOverrides?: Record<string, string>,
+    remoteEnv?: RemoteEnvContext,
+): Partial<Options> {
+    ensureClaudeConfig();
+    const localOpts = getLocalOptions(envOverrides);
+    return remoteEnv?.enabled ? getDockerOptions(localOpts, envOverrides, remoteEnv) : localOpts;
 }

@@ -62,6 +62,7 @@ import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
 import { getValidClaudeOAuthToken } from '@craft-agent/shared/auth'
 import { resolveAuthEnvVars } from '@craft-agent/shared/config'
+import { stopContainer, wrapStdioServersForDocker } from '@craft-agent/shared/agent/docker-env'
 import { toolMetadataStore, getLastApiError } from '@craft-agent/shared/interceptor'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
@@ -167,25 +168,50 @@ async function buildServersFromSources(
   sources: LoadedSource[],
   sessionPath?: string,
   tokenRefreshManager?: TokenRefreshManager,
-  summarize?: SummarizeCallback
+  summarize?: SummarizeCallback,
+  /** When set, wrap stdio MCP servers to run inside the session's Docker container */
+  dockerSessionId?: string,
 ) {
   const span = perf.span('sources.buildServers', { count: sources.length })
   const credManager = getSourceCredentialManager()
   const serverBuilder = getSourceServerBuilder()
 
-  // Load credentials for all sources
+  // Load credentials for all sources.
+  // Nango-backed sources fetch tokens from the Nango API instead of the local credential store.
   const sourcesWithCreds: SourceWithCredential[] = await Promise.all(
-    sources.map(async (source) => ({
-      source,
-      token: await credManager.getToken(source),
-      credential: await credManager.getApiCredential(source),
-    }))
+    sources.map(async (source) => {
+      // Nango sources: fetch token from Nango API via TokenRefreshManager
+      if (source.config.credentialProvider === 'nango' && source.config.nango) {
+        const manager = tokenRefreshManager ?? new TokenRefreshManager(credManager, {
+          log: (msg) => sessionLog.debug(msg),
+        })
+        const result = await manager.ensureFreshToken(source)
+        return {
+          source,
+          token: result.success ? result.token : null,
+          credential: null,
+        }
+      }
+      // Local sources: load from encrypted credential store
+      return {
+        source,
+        token: await credManager.getToken(source),
+        credential: await credManager.getApiCredential(source),
+      }
+    })
   )
   span.mark('credentials.loaded')
 
-  // Build token getter for OAuth sources (Google, Slack, Microsoft use OAuth)
-  // Uses TokenRefreshManager for unified refresh logic (DRY principle)
+  // Build token getter for OAuth and Nango sources that need auto-refresh.
+  // Uses TokenRefreshManager for unified refresh logic (DRY principle).
   const getTokenForSource = (source: LoadedSource) => {
+    // Nango-backed API sources: use TokenRefreshManager for on-demand token fetching
+    if (source.config.credentialProvider === 'nango' && source.config.nango) {
+      const manager = tokenRefreshManager ?? new TokenRefreshManager(credManager, {
+        log: (msg) => sessionLog.debug(msg),
+      })
+      return createTokenGetter(manager, source)
+    }
     const provider = source.config.provider
     if (isApiOAuthProvider(provider)) {
       // Use TokenRefreshManager if provided, otherwise create temporary one
@@ -212,6 +238,12 @@ async function buildServersFromSources(
         sessionLog.info(`Marked source ${error.sourceSlug} as needing re-auth`)
       }
     }
+  }
+
+  // When Docker sandbox is enabled, wrap stdio MCP servers to run inside the container
+  // via `docker exec`. HTTP/SSE servers pass through unchanged (they connect over network).
+  if (dockerSessionId) {
+    result.mcpServers = wrapStdioServersForDocker(result.mcpServers, dockerSessionId) as typeof result.mcpServers
   }
 
   span.end()
@@ -249,7 +281,7 @@ async function refreshOAuthTokensIfNeeded(
   sources: LoadedSource[],
   sessionPath: string,
   tokenRefreshManager: TokenRefreshManager,
-  options?: { sessionId?: string; workspaceRootPath?: string; poolServerUrl?: string }
+  options?: { sessionId?: string; workspaceRootPath?: string; poolServerUrl?: string; dockerSessionId?: string }
 ): Promise<OAuthTokenRefreshResult> {
   sessionLog.debug('[OAuth] Checking if any OAuth tokens need refresh')
 
@@ -279,7 +311,8 @@ async function refreshOAuthTokensIfNeeded(
       enabledSources,
       sessionPath,
       tokenRefreshManager,
-      agent.getSummarizeCallback()
+      agent.getSummarizeCallback(),
+      options?.dockerSessionId,
     )
     const intendedSlugs = enabledSources.map(s => s.config.slug)
     await agent.setSourceServers(mcpServers, apiServers, intendedSlugs)
@@ -578,6 +611,9 @@ interface ManagedSession {
   permissionMode?: PermissionMode
   /** Previous permission mode (preserved across restarts for session_state modeTransition context) */
   previousPermissionMode?: PermissionMode
+  /** When Docker sandbox is enabled, the session ID used as container name suffix.
+   *  Set in getOrCreateAgent() — used by buildServersFromSources() to wrap stdio MCP servers. */
+  dockerSessionId?: string
   /** Centralized MCP client pool for this session's source connections */
   mcpPool?: McpClientPool
   /** HTTP MCP server exposing pool tools to external SDK subprocesses */
@@ -1267,7 +1303,7 @@ export class SessionManager {
     )
     // Pass session path so large API responses can be saved to session folder
     const sessionPath = getSessionStoragePath(workspaceRootPath, managed.id)
-    const { mcpServers, apiServers } = await buildServersFromSources(enabledSources, sessionPath, managed.tokenRefreshManager, managed.agent?.getSummarizeCallback())
+    const { mcpServers, apiServers } = await buildServersFromSources(enabledSources, sessionPath, managed.tokenRefreshManager, managed.agent?.getSummarizeCallback(), managed.dockerSessionId)
     const intendedSlugs = enabledSources.map(s => s.config.slug)
 
     // Update bridge-mcp-server config/credentials for backends that need it
@@ -1669,7 +1705,7 @@ export class SessionManager {
         enabledSlugs.includes(s.config.slug) && isSourceUsable(s)
       )
       const { mcpServers } = await buildServersFromSources(
-        enabledSources, sessionPath, managed.tokenRefreshManager
+        enabledSources, sessionPath, managed.tokenRefreshManager, undefined, managed.dockerSessionId
       )
       await applyBridgeUpdates(managed.agent, sessionPath, enabledSources, mcpServers, managed.id, workspaceRootPath, 'source auth', managed.poolServer?.url)
     }
@@ -1793,6 +1829,20 @@ export class SessionManager {
     return sessions
       .map(m => managedToSession(m))
       .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))
+  }
+
+  /**
+   * Get the Docker session ID for an active session in a workspace.
+   * Used by IPC handlers to wrap stdio MCP commands for Docker execution.
+   * Returns undefined if no Docker-enabled session is active.
+   */
+  getDockerSessionId(workspaceRootPath: string): string | undefined {
+    for (const managed of this.sessions.values()) {
+      if (managed.workspace.rootPath === workspaceRootPath && managed.dockerSessionId) {
+        return managed.dockerSessionId
+      }
+    }
+    return undefined
   }
 
   /**
@@ -2295,8 +2345,23 @@ export class SessionManager {
         enabledSlugs.includes(s.config.slug) && isSourceUsable(s)
       )
 
+      // Build remote env context from workspace config (Docker sandbox)
+      const remoteEnvConfig = workspaceConfig?.remoteEnv
+      const remoteEnv = remoteEnvConfig?.enabled ? {
+        enabled: true,
+        sessionId: managed.id,
+        workingDirectory: managed.workingDirectory || managed.workspace.rootPath,
+        workspaceRootPath: managed.workspace.rootPath,
+        network: remoteEnvConfig.network,
+        additionalMounts: remoteEnvConfig.additionalMounts,
+      } : undefined
+
+      // Store Docker session ID for buildServersFromSources to wrap stdio MCP servers
+      managed.dockerSessionId = remoteEnv?.sessionId
+
       // Build server configs for enabled sources
-      const { mcpServers, apiServers } = await buildServersFromSources(enabledSources, sessionPath, managed.tokenRefreshManager)
+      // When Docker sandbox is enabled, stdio MCP servers are wrapped to run inside the container
+      const { mcpServers, apiServers } = await buildServersFromSources(enabledSources, sessionPath, managed.tokenRefreshManager, undefined, managed.dockerSessionId)
 
       // Create centralized MCP client pool (all backends use it)
       managed.mcpPool = new McpClientPool({ debug: (msg) => sessionLog.debug(msg), workspaceRootPath: managed.workspace.rootPath, sessionPath })
@@ -2376,6 +2441,7 @@ export class SessionManager {
         mcpPool: managed.mcpPool,
         poolServerUrl,
         envOverrides,
+        remoteEnv,
         // Claude-specific
         isHeadless: !AGENT_FLAGS.defaultModesEnabled,
         automationSystem: this.automationSystems.get(managed.workspace.rootPath),
@@ -3090,7 +3156,7 @@ export class SessionManager {
         const allEnabledSources = getSourcesBySlugs(workspaceRootPath, managed.enabledSourceSlugs || [])
         // Pass session path so large API responses can be saved to session folder
         const sessionPath = getSessionStoragePath(workspaceRootPath, managed.id)
-        const { mcpServers, apiServers, errors } = await buildServersFromSources(allEnabledSources, sessionPath, managed.tokenRefreshManager, managed.agent?.getSummarizeCallback())
+        const { mcpServers, apiServers, errors } = await buildServersFromSources(allEnabledSources, sessionPath, managed.tokenRefreshManager, managed.agent?.getSummarizeCallback(), managed.dockerSessionId)
 
         if (errors.length > 0) {
           sessionLog.warn(`Source build errors during auto-enable:`, errors)
@@ -3524,7 +3590,7 @@ export class SessionManager {
       const sources = getSourcesBySlugs(workspaceRootPath, sourceSlugs)
       // Pass session path so large API responses can be saved to session folder
       const sessionPath = getSessionStoragePath(workspaceRootPath, sessionId)
-      const { mcpServers, apiServers, errors } = await buildServersFromSources(sources, sessionPath, managed.tokenRefreshManager, managed.agent.getSummarizeCallback())
+      const { mcpServers, apiServers, errors } = await buildServersFromSources(sources, sessionPath, managed.tokenRefreshManager, managed.agent.getSummarizeCallback(), managed.dockerSessionId)
       if (errors.length > 0) {
         sessionLog.warn(`Source build errors:`, errors)
       }
@@ -3969,6 +4035,11 @@ export class SessionManager {
       })
     }
 
+    // Stop Docker container if Docker sandbox was enabled for this session
+    stopContainer(sessionId).catch(err => {
+      sessionLog.debug(`Docker container cleanup for ${sessionId}: ${err instanceof Error ? err.message : err}`)
+    })
+
     this.sessions.delete(sessionId)
 
     // Clean up session metadata in AutomationSystem (prevents memory leak)
@@ -4243,7 +4314,7 @@ export class SessionManager {
       const sources = getSourcesBySlugs(workspaceRootPath, managed.enabledSourceSlugs)
       // Pass session path so large API responses can be saved to session folder
       const sessionPath = getSessionStoragePath(workspaceRootPath, sessionId)
-      const { mcpServers, apiServers, errors } = await buildServersFromSources(sources, sessionPath, managed.tokenRefreshManager, agent.getSummarizeCallback())
+      const { mcpServers, apiServers, errors } = await buildServersFromSources(sources, sessionPath, managed.tokenRefreshManager, agent.getSummarizeCallback(), managed.dockerSessionId)
       if (errors.length > 0) {
         sessionLog.warn(`Source build errors:`, errors)
       }
@@ -4272,7 +4343,7 @@ export class SessionManager {
           sources,
           sessionPath,
           managed.tokenRefreshManager,
-          { sessionId, workspaceRootPath, poolServerUrl: managed.poolServer?.url }
+          { sessionId, workspaceRootPath, poolServerUrl: managed.poolServer?.url, dockerSessionId: managed.dockerSessionId }
         )
         if (refreshResult.failedSources.length > 0) {
           sessionLog.warn('[OAuth] Some sources failed token refresh:', refreshResult.failedSources.map(f => f.slug))

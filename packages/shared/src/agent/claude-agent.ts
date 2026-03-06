@@ -1,5 +1,5 @@
 import { query, createSdkMcpServer, tool, AbortError, type Query, type SDKUserMessage, type SDKAssistantMessageError, type Options, type SDKResultSuccess } from '@anthropic-ai/claude-agent-sdk';
-import { getDefaultOptions, resetClaudeConfigCheck } from './options.ts';
+import { getDefaultOptions, resetClaudeConfigCheck, type RemoteEnvContext } from './options.ts';
 // Local type for SDK user message content blocks (text, image, document)
 // Replaces import from @anthropic-ai/sdk/resources — keeps SDK as agent-only dependency
 type ContentBlockParam =
@@ -79,6 +79,25 @@ import { IMAGE_LIMITS } from '../utils/files.ts';
 /** Image extensions that may need size-guard in PreToolUse (matches Read tool's image detection) */
 const IMAGE_READ_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff']);
 
+const SENSITIVE_HEADER_KEYS = /^(authorization|x-api-key|api-key|proxy-authorization)$/i;
+
+/** Replace sensitive header values with '***' for safe debug logging */
+function redactMcpServers(servers: Record<string, { headers?: Record<string, string>; [k: string]: unknown }>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [name, config] of Object.entries(servers)) {
+    if (!config?.headers) {
+      result[name] = config;
+      continue;
+    }
+    const redactedHeaders: Record<string, string> = {};
+    for (const [header, value] of Object.entries(config.headers)) {
+      redactedHeaders[header] = SENSITIVE_HEADER_KEYS.test(header) ? '***' : value;
+    }
+    result[name] = { ...config, headers: redactedHeaders };
+  }
+  return result;
+}
+
 // Re-export permission mode functions for application usage
 export {
   // Permission mode API
@@ -148,6 +167,8 @@ export interface ClaudeAgentConfig {
    * must not be clobbered by concurrent sessions.
    */
   envOverrides?: Record<string, string>;
+  /** Remote environment config — when enabled, agent runs in Docker container */
+  remoteEnv?: RemoteEnvContext;
   /** Mini/utility model for summarization, title generation, and mini completions. */
   miniModel?: string;
   /** Centralized MCP client pool for source tool execution. */
@@ -431,6 +452,7 @@ export class ClaudeAgent extends BaseAgent {
       onSdkSessionIdCleared: config.onSdkSessionIdCleared,
       getRecoveryMessages: config.getRecoveryMessages,
       envOverrides: config.envOverrides,
+      remoteEnv: config.remoteEnv,
       miniModel: config.miniModel,
       mcpPool: config.mcpPool,
       connectionSlug: config.connectionSlug,
@@ -699,7 +721,7 @@ export class ClaudeAgent extends BaseAgent {
       // Build full MCP servers set first, then filter for mini agents
       const fullMcpServers: Options['mcpServers'] = {
         // Session-scoped tools (SubmitPlan, source_test, update_user_preferences, transform_data, etc.)
-        session: getSessionScopedTools(sessionId, this.workspaceRootPath),
+        session: getSessionScopedTools(sessionId, this.workspaceRootPath, undefined, this.config.remoteEnv),
         // Craft Agents documentation - always available for searching setup guides
         // This is a public Mintlify MCP server, no auth needed
         'craft-agents-docs': {
@@ -759,7 +781,7 @@ export class ClaudeAgent extends BaseAgent {
       }
 
       const options: Options = {
-        ...getDefaultOptions(this.config.envOverrides),
+        ...getDefaultOptions(this.config.envOverrides, this.config.remoteEnv),
         model,
         // Capture stderr from SDK subprocess for error diagnostics
         // This helps identify why sessions fail with "process exited with code 1"
@@ -790,7 +812,10 @@ export class ClaudeAgent extends BaseAgent {
                 this.pinnedPreferencesPrompt ?? undefined,
                 this.config.debugMode,
                 this.workspaceRootPath,
-                this.config.session?.workingDirectory
+                this.config.session?.workingDirectory,
+                undefined, // preset
+                undefined, // backendName
+                this.config.remoteEnv?.enabled, // isDockerSandbox
               ),
             },
         // Use sdkCwd for SDK session storage - this is set once at session creation and never changes.

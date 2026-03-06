@@ -334,6 +334,11 @@ export const toolMetadataStore = {
   get size(): number {
     return _metadataMap.size;
   },
+
+  /** Clear all in-memory metadata. For testing only. */
+  _clearForTesting(): void {
+    _metadataMap.clear();
+  },
 };
 
 // ============================================================================

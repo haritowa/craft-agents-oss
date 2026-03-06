@@ -1855,6 +1855,7 @@ export function shouldAllowToolInMode(
         'mcp__session__transform_data',
         'mcp__session__render_template',
         'mcp__session__call_llm',
+        'mcp__session__nango_list_connections',
         // Browser session tools (agent-safe browsing workflow)
         'mcp__session__browser_open',
         'mcp__session__browser_navigate',

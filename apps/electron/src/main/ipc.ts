@@ -1547,18 +1547,19 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
       thinkingLevel: config?.defaults?.thinkingLevel,
       workingDirectory: config?.defaults?.workingDirectory,
       localMcpEnabled: config?.localMcpServers?.enabled ?? true,
+      dockerEnabled: config?.remoteEnv?.enabled ?? false,
       defaultLlmConnection: config?.defaults?.defaultLlmConnection,
       enabledSourceSlugs: config?.defaults?.enabledSourceSlugs ?? [],
     }
   })
 
   // Update a workspace setting
-  // Valid keys: 'name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection'
+  // Valid keys: 'name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'dockerEnabled', 'defaultLlmConnection'
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_SETTINGS_UPDATE, async (_event, workspaceId: string, key: string, value: unknown) => {
     const workspace = getWorkspaceOrThrow(workspaceId)
 
     // Validate key is a known workspace setting
-    const validKeys = ['name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection']
+    const validKeys = ['name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'dockerEnabled', 'defaultLlmConnection']
     if (!validKeys.includes(key)) {
       throw new Error(`Invalid workspace setting key: ${key}. Valid keys: ${validKeys.join(', ')}`)
     }
@@ -1584,6 +1585,10 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
       // Store in localMcpServers.enabled (top-level, not in defaults)
       config.localMcpServers = config.localMcpServers || { enabled: true }
       config.localMcpServers.enabled = Boolean(value)
+    } else if (key === 'dockerEnabled') {
+      // Store in remoteEnv.enabled (top-level, not in defaults)
+      config.remoteEnv = config.remoteEnv || { enabled: false }
+      config.remoteEnv.enabled = Boolean(value)
     } else {
       // Update the setting in defaults
       config.defaults = config.defaults || {}
@@ -2404,12 +2409,35 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
         if (!source.config.mcp.command) {
           return { success: false, error: 'Stdio MCP source is missing required "command" field' }
         }
-        ipcLog.info(`Fetching MCP tools via stdio: ${source.config.mcp.command}`)
+
+        // When Docker sandbox is enabled, wrap the stdio command to run inside the container.
+        // We need an active session's container — find one for this workspace.
+        let command = source.config.mcp.command
+        let args = source.config.mcp.args
+        let env = source.config.mcp.env
+        const { loadWorkspaceConfig } = await import('@craft-agent/shared/config')
+        const wsConfig = loadWorkspaceConfig(workspace.rootPath)
+        if (wsConfig?.remoteEnv?.enabled) {
+          const { wrapStdioConfigForDocker } = await import('@craft-agent/shared/agent/docker-env')
+          // Find an active session for this workspace to get container name
+          const dockerSessionId = sessionManager.getDockerSessionId(workspace.rootPath)
+          if (dockerSessionId) {
+            const wrapped = wrapStdioConfigForDocker(
+              { type: 'stdio', command, args, env },
+              dockerSessionId,
+            )
+            command = wrapped.command
+            args = wrapped.args
+            env = wrapped.env
+          }
+        }
+
+        ipcLog.info(`Fetching MCP tools via stdio: ${command}`)
         client = new CraftMcpClient({
           transport: 'stdio',
-          command: source.config.mcp.command,
-          args: source.config.mcp.args,
-          env: source.config.mcp.env,
+          command,
+          args,
+          env,
         })
       } else {
         // HTTP/SSE transport - connect to remote MCP server
@@ -2418,7 +2446,21 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
         }
 
         let accessToken: string | undefined
-        if (source.config.mcp.authType === 'oauth' || source.config.mcp.authType === 'bearer') {
+        if (source.config.credentialProvider === 'nango' && source.config.nango) {
+          // Nango-backed sources: fetch token from Nango API
+          const { getNangoToken, isValidNangoSecretKey } = await import('@craft-agent/shared/sources')
+          const secretKey = process.env.NANGO_SECRET_KEY
+          if (secretKey && isValidNangoSecretKey(secretKey)) {
+            try {
+              const host = source.config.nango.host || process.env.NANGO_HOST
+              const result = await getNangoToken(source.config.nango, secretKey, host)
+              accessToken = result.accessToken
+            } catch (err) {
+              ipcLog.error(`Failed to get Nango token for ${sourceSlug}:`, err)
+            }
+          }
+        } else if (source.config.mcp.authType === 'oauth' || source.config.mcp.authType === 'bearer') {
+          // Local credential store
           const credentialManager = getCredentialManager()
           const credentialId = source.config.mcp.authType === 'oauth'
             ? { type: 'source_oauth' as const, workspaceId: source.workspaceId, sourceId: sourceSlug }

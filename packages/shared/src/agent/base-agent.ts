@@ -883,8 +883,14 @@ Please continue the conversation naturally from where we left off.
       }
     }
 
-    // Strip control mentions (skills, sources) from the message text
-    const stripped = stripAllMentions(message);
+    // Build source name map so [source:slug] is replaced with display name instead of removed
+    const sourceNames = new Map<string, string>();
+    for (const source of this.sourceManager.getAllSources()) {
+      sourceNames.set(source.config.slug, source.config.name);
+    }
+
+    // Strip control mentions (skills) and replace source mentions with display names
+    const stripped = stripAllMentions(message, sourceNames);
 
     // Resolve [file:path] and [folder:path] to absolute paths
     const workDir = this.config.session?.workingDirectory ?? this.workingDirectory;

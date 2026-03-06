@@ -1347,56 +1347,42 @@ function backfillAllConnectionModels(config: StoredConfig): boolean {
 }
 
 /**
- * Migrate Opus 4.5 to Opus 4.6 for direct Anthropic connections (API key or OAuth).
- * Only applies to anthropic provider type (not compat), as third-party providers
- * like OpenRouter may not support the new model ID yet.
+ * Sync Anthropic connection models with the registry.
+ *
+ * For direct Anthropic connections (not compat/third-party), replaces the
+ * stored models array with the current ANTHROPIC_MODELS from the registry.
+ * This ensures new models (e.g., Sonnet 4.6) appear and removed models disappear
+ * without needing per-model migration functions.
+ *
+ * Preserves the user's defaultModel if it still exists in the registry;
+ * otherwise resets to the registry's first model.
  */
-function migrateOpus45ToOpus46(config: StoredConfig): boolean {
+function syncAnthropicModelsWithRegistry(config: StoredConfig): boolean {
   if (!config.llmConnections) return false;
 
-  const OPUS_45_ID = 'claude-opus-4-5-20251101';
-  const OPUS_46_ID = 'claude-opus-4-6';
+  const registryModels = getDefaultModelsForConnection('anthropic');
+  const registryIds = new Set(registryModels.map(m => typeof m === 'string' ? m : m.id));
 
   let changed = false;
 
   for (const connection of config.llmConnections) {
-    // Only migrate direct Anthropic connections (not compat/third-party)
+    // Only sync direct Anthropic connections (not compat/third-party)
     if (connection.providerType !== 'anthropic') continue;
 
-    // Migrate defaultModel
-    if (connection.defaultModel === OPUS_45_ID) {
-      connection.defaultModel = OPUS_46_ID;
+    // Check if stored models differ from registry
+    const storedIds = (connection.models ?? []).map(m => typeof m === 'string' ? m : m.id);
+    const registryIdList = [...registryIds];
+    const needsSync = storedIds.length !== registryIdList.length ||
+      storedIds.some((id, i) => id !== registryIdList[i]);
+
+    if (needsSync) {
+      connection.models = registryModels;
       changed = true;
-    }
 
-    // Migrate models array
-    if (connection.models && Array.isArray(connection.models)) {
-      const hasNew = connection.models.some(m =>
-        (typeof m === 'string' ? m : m.id) === OPUS_46_ID
-      );
-
-      if (hasNew) {
-        // New model already exists — just remove the old entry to avoid duplicates
-        const before = connection.models.length;
-        connection.models = connection.models.filter(m =>
-          (typeof m === 'string' ? m : m.id) !== OPUS_45_ID
-        );
-        if (connection.models.length !== before) changed = true;
-      } else {
-        // New model doesn't exist — rename the old entry in place
-        for (let i = 0; i < connection.models.length; i++) {
-          const model = connection.models[i];
-          if (typeof model === 'string' && model === OPUS_45_ID) {
-            connection.models[i] = OPUS_46_ID;
-            changed = true;
-          } else if (typeof model === 'object' && model.id === OPUS_45_ID) {
-            model.id = OPUS_46_ID;
-            if (model.name?.includes('4.5')) {
-              model.name = model.name.replace('4.5', '4.6');
-            }
-            changed = true;
-          }
-        }
+      // Preserve defaultModel if still valid, otherwise reset
+      if (connection.defaultModel && !registryIds.has(connection.defaultModel)) {
+        const first = registryModels[0];
+        connection.defaultModel = typeof first === 'string' ? first : first?.id;
       }
     }
   }
@@ -1404,82 +1390,7 @@ function migrateOpus45ToOpus46(config: StoredConfig): boolean {
   return changed;
 }
 
-/**
- * Migrate Sonnet 4.5 to Sonnet 4.6 for direct Anthropic connections.
- * Same pattern as migrateOpus45ToOpus46 — updates stored model IDs and names.
- */
-function migrateSonnet45ToSonnet46(config: StoredConfig): boolean {
-  if (!config.llmConnections) return false;
 
-  const SONNET_45_ID = 'claude-sonnet-4-5-20250929';
-  const SONNET_46_ID = 'claude-sonnet-4-6';
-
-  let changed = false;
-
-  for (const connection of config.llmConnections) {
-    // Only migrate direct Anthropic connections (not compat/third-party)
-    if (connection.providerType !== 'anthropic') continue;
-
-    // Migrate defaultModel
-    if (connection.defaultModel === SONNET_45_ID) {
-      connection.defaultModel = SONNET_46_ID;
-      changed = true;
-    }
-
-    // Migrate models array
-    if (connection.models && Array.isArray(connection.models)) {
-      const hasNew = connection.models.some(m =>
-        (typeof m === 'string' ? m : m.id) === SONNET_46_ID
-      );
-
-      if (hasNew) {
-        // New model already exists — just remove the old entry to avoid duplicates
-        const before = connection.models.length;
-        connection.models = connection.models.filter(m =>
-          (typeof m === 'string' ? m : m.id) !== SONNET_45_ID
-        );
-        if (connection.models.length !== before) changed = true;
-      } else {
-        // New model doesn't exist — rename the old entry in place
-        for (let i = 0; i < connection.models.length; i++) {
-          const model = connection.models[i];
-          if (typeof model === 'string' && model === SONNET_45_ID) {
-            connection.models[i] = SONNET_46_ID;
-            changed = true;
-          } else if (typeof model === 'object' && model.id === SONNET_45_ID) {
-            model.id = SONNET_46_ID;
-            if (model.name?.includes('4.5')) {
-              model.name = model.name.replace('4.5', '4.6');
-            }
-            changed = true;
-          }
-        }
-      }
-    }
-  }
-
-  return changed;
-}
-
-/**
- * Migrate Sonnet 4.5 to Sonnet 4.6 in workspace default models.
- */
-function migrateWorkspaceSonnet45ToSonnet46(config: StoredConfig): void {
-  if (!config.workspaces) return;
-
-  const SONNET_45_ID = 'claude-sonnet-4-5-20250929';
-  const SONNET_46_ID = 'claude-sonnet-4-6';
-
-  for (const workspace of config.workspaces) {
-    const wsConfig = loadWorkspaceConfig(workspace.rootPath);
-    if (!wsConfig?.defaults?.model) continue;
-
-    if (wsConfig.defaults.model === SONNET_45_ID) {
-      wsConfig.defaults.model = SONNET_46_ID;
-      saveWorkspaceConfig(workspace.rootPath, wsConfig);
-    }
-  }
-}
 
 /**
  * Migrate Opus 4.5 to Opus 4.6 in workspace default models.
@@ -1660,18 +1571,10 @@ export function migrateLegacyLlmConnectionsConfig(): void {
     if (migrateModelDefaultsToConnections(config)) {
       needsSave = true;
     }
-    // Phase 1d: Migrate Opus 4.5 → Opus 4.6 for direct Anthropic connections
-    if (migrateOpus45ToOpus46(config)) {
+    // Phase 1d: Sync Anthropic connection models with the registry
+    if (syncAnthropicModelsWithRegistry(config)) {
       needsSave = true;
     }
-    // Phase 1e: Migrate Opus 4.5 → Opus 4.6 in workspace default models
-    migrateWorkspaceOpus45ToOpus46(config);
-    // Phase 1f: Migrate Sonnet 4.5 → Sonnet 4.6 for direct Anthropic connections
-    if (migrateSonnet45ToSonnet46(config)) {
-      needsSave = true;
-    }
-    // Phase 1g: Migrate Sonnet 4.5 → Sonnet 4.6 in workspace default models
-    migrateWorkspaceSonnet45ToSonnet46(config);
 
     if (needsSave) {
       saveConfig(config);

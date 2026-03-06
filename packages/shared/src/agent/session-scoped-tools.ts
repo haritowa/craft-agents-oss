@@ -20,6 +20,7 @@ import { getSessionPlansPath, getSessionPath } from '../sessions/storage.ts';
 import { debug } from '../utils/debug.ts';
 import { DOC_REFS } from '../docs/index.ts';
 import { createClaudeContext } from './claude-context.ts';
+import type { RemoteEnvContext } from './options.ts';
 import { basename } from 'node:path';
 
 // Import from session-tools-core: registry + schemas + base descriptions
@@ -36,6 +37,11 @@ import { createLLMTool, type LLMQueryRequest, type LLMQueryResult } from './llm-
 import { createSpawnSessionTool, type SpawnSessionFn } from './spawn-session-tool.ts';
 import { createBrowserTools, type BrowserPaneFns } from './browser-tools.ts';
 import { FEATURE_FLAGS } from '../feature-flags.ts';
+import { z } from 'zod';
+
+// Import Nango provider and source storage
+import { listNangoConnections, isValidNangoSecretKey } from '../sources/nango-provider.ts';
+import { loadSourceConfig, saveSourceConfig } from '../sources/storage.ts';
 
 // Re-export types for backward compatibility
 export type {
@@ -269,7 +275,8 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
 export function getSessionScopedTools(
   sessionId: string,
   workspaceRootPath: string,
-  workspaceId?: string
+  workspaceId?: string,
+  remoteEnv?: RemoteEnvContext
 ): ReturnType<typeof createSdkMcpServer> {
   const cacheKey = `${sessionId}::${workspaceRootPath}`;
 
@@ -293,6 +300,7 @@ export function getSessionScopedTools(
       const callbacks = getSessionScopedToolCallbacks(sessionId);
       callbacks?.onAuthRequest?.(request as AuthRequest);
     },
+    remoteEnv,
   });
 
   // Helper to create a tool from the canonical registry.
@@ -349,6 +357,91 @@ export function getSessionScopedTools(
         return callbacks?.browserPaneFns;
       },
     }),
+  );
+
+  // Add nango_list_connections tool
+  tools.push(
+    tool('nango_list_connections',
+      `List all available connections from Nango. Requires NANGO_SECRET_KEY environment variable to be set.
+Returns a list of connections with their integration IDs and connection IDs.
+**IMPORTANT:** If \`$NANGO_HOST\` is set in the environment, you MUST pass it as the \`host\` parameter.`,
+      {
+        search: z.string().optional().describe('Optional search string to filter connections'),
+        host: z.string().optional().describe('Nango API host URL'),
+      },
+      async (args) => {
+        const secretKey = process.env.NANGO_SECRET_KEY;
+        if (!secretKey) {
+          return { content: [{ type: 'text' as const, text: 'Error: NANGO_SECRET_KEY environment variable is not set.' }], isError: true };
+        }
+        if (!isValidNangoSecretKey(secretKey)) {
+          return { content: [{ type: 'text' as const, text: 'Error: NANGO_SECRET_KEY is not a valid UUID v4.' }], isError: true };
+        }
+        const host = args.host || process.env.NANGO_HOST;
+        try {
+          const connections = await listNangoConnections(secretKey, host);
+          if (connections.length === 0) {
+            return { content: [{ type: 'text' as const, text: 'No Nango connections found.' }] };
+          }
+          const filtered = args.search
+            ? connections.filter(c =>
+                c.connectionId.toLowerCase().includes(args.search!.toLowerCase()) ||
+                c.integrationId.toLowerCase().includes(args.search!.toLowerCase()) ||
+                c.provider.toLowerCase().includes(args.search!.toLowerCase()))
+            : connections;
+          if (filtered.length === 0) {
+            return { content: [{ type: 'text' as const, text: `No connections matching "${args.search}". ${connections.length} total available.` }] };
+          }
+          const lines = [`Found ${filtered.length} Nango connection(s):\n`];
+          for (const conn of filtered) {
+            const hasErrors = conn.errors.length > 0;
+            const errorStr = hasErrors ? ` [ERRORS: ${conn.errors.map(e => e.type).join(', ')}]` : '';
+            lines.push(`- provider: ${conn.provider}, integrationId: "${conn.integrationId}", connectionId: "${conn.connectionId}"${errorStr}`);
+          }
+          lines.push('', 'Use nango_configure_source to set a source to use one of these connections.');
+          return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+        } catch (err) {
+          return { content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+        }
+      }
+    ),
+  );
+
+  // Add nango_configure_source tool
+  tools.push(
+    tool('nango_configure_source',
+      `Configure an existing source to use Nango for credential management.
+Sets credentialProvider: "nango" and the nango config block on the source.
+**Workflow:** 1. Call nango_list_connections first, 2. Then call this with matching integration/connection IDs.
+**IMPORTANT:** If \`$NANGO_HOST\` is set, pass it as the \`host\` parameter.`,
+      {
+        sourceSlug: z.string().describe('The slug of the source to configure'),
+        integrationId: z.string().describe('Nango integration ID (provider_config_key)'),
+        connectionId: z.string().describe('Nango connection ID'),
+        host: z.string().optional().describe('Nango API host URL'),
+      },
+      async (args) => {
+        const secretKey = process.env.NANGO_SECRET_KEY;
+        if (!secretKey || !isValidNangoSecretKey(secretKey)) {
+          return { content: [{ type: 'text' as const, text: 'Error: NANGO_SECRET_KEY not set or invalid.' }], isError: true };
+        }
+        const config = loadSourceConfig(workspaceRootPath, args.sourceSlug);
+        if (!config) {
+          return { content: [{ type: 'text' as const, text: `Error: Source "${args.sourceSlug}" not found.` }], isError: true };
+        }
+        const host = args.host || process.env.NANGO_HOST;
+        config.credentialProvider = 'nango';
+        config.nango = { integrationId: args.integrationId, connectionId: args.connectionId, ...(host ? { host } : {}) };
+        config.isAuthenticated = true;
+        config.updatedAt = Date.now();
+        try {
+          saveSourceConfig(workspaceRootPath, config);
+        } catch (err) {
+          return { content: [{ type: 'text' as const, text: `Error saving: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+        }
+        return { content: [{ type: 'text' as const, text: `Source "${config.name}" configured to use Nango (${args.integrationId}/${args.connectionId}).` }] };
+      }
+    ),
   );
 
   // Create MCP server

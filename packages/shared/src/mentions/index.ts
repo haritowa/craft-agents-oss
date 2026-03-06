@@ -126,10 +126,16 @@ export function parseMentions(
  * @param text - The message text with mentions
  * @returns Text with all [bracket] mentions removed
  */
-export function stripAllMentions(text: string): string {
+export function stripAllMentions(text: string, sourceNames?: Map<string, string>): string {
   return text
-    // Remove [source:slug]
-    .replace(/\[source:[\w-]+\]/g, '')
+    // Replace [source:slug] with display name if available, otherwise remove
+    .replace(/\[source:([\w-]+)\]/g, (_match, slug: string) => {
+      if (sourceNames) {
+        const name = sourceNames.get(slug)
+        if (name) return name
+      }
+      return ''
+    })
     // Remove [skill:slug] or [skill:workspaceId:slug]
     // Workspace IDs can contain spaces, hyphens, underscores, and dots
     .replace(new RegExp(`\\[skill:(?:${WS_ID_CHARS}+:)?[\\w-]+\\]`, 'g'), '')

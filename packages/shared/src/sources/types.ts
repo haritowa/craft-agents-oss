@@ -249,6 +249,13 @@ export interface McpSourceConfig {
    * Environment variables for the spawned process.
    */
   env?: Record<string, string>;
+
+  /**
+   * Name of the environment variable to inject the auth token into for stdio servers.
+   * When set, the system injects the token (from local credentials or Nango) as this
+   * env var when spawning the server. Example: "GITHUB_TOKEN", "SLACK_BOT_TOKEN".
+   */
+  tokenEnvVar?: string;
 }
 
 /**
@@ -325,6 +332,24 @@ export interface SourceBrand {
 }
 
 // ============================================================================
+// Nango Credential Provider
+// ============================================================================
+
+/**
+ * Nango credential provider configuration.
+ * When set on a source, tokens are fetched from Nango's REST API
+ * instead of the local encrypted credential store.
+ */
+export interface NangoSourceConfig {
+  /** Nango integration ID (provider config key), e.g., 'google-mail', 'slack', 'github' */
+  integrationId: string;
+  /** Nango connection ID (your user/entity identifier), e.g., 'user-123' */
+  connectionId: string;
+  /** Nango API host for self-hosted instances (defaults to https://nango.haritowa.work) */
+  host?: string;
+}
+
+// ============================================================================
 // Main Source Config
 // ============================================================================
 
@@ -359,6 +384,10 @@ export interface FolderSourceConfig {
 
   // Brand theming for this source's UI elements
   brand?: SourceBrand;
+
+  // Nango credential provider (optional — when set, tokens come from Nango instead of local store)
+  credentialProvider?: 'local' | 'nango';
+  nango?: NangoSourceConfig;
 
   // Status tracking
   isAuthenticated?: boolean;

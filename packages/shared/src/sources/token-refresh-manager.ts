@@ -14,6 +14,7 @@
 import { isOAuthSource, type LoadedSource } from './types.ts';
 import type { SourceCredentialManager } from './credential-manager.ts';
 import { markSourceAuthenticated } from './storage.ts';
+import { getNangoToken, isValidNangoSecretKey } from './nango-provider.ts';
 
 /** Default cooldown after failed refresh (5 minutes) */
 const DEFAULT_COOLDOWN_MS = 5 * 60 * 1000;
@@ -36,8 +37,25 @@ export interface RefreshManagerOptions {
   log?: (message: string) => void;
 }
 
+/** Cached Nango token with expiry info */
+interface CachedNangoToken {
+  token: string;
+  /** When this token expires (Unix ms). Undefined = no known expiry (e.g. API_KEY). */
+  expiresAt?: number;
+  /** When we fetched this token (Unix ms) */
+  fetchedAt: number;
+}
+
+/** Refresh Nango tokens 5 minutes before expiry */
+const NANGO_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+
+/** For Nango tokens without expiry (e.g. API_KEY), re-fetch every 30 minutes */
+const NANGO_NO_EXPIRY_TTL_MS = 30 * 60 * 1000;
+
 export class TokenRefreshManager {
   private failedAttempts = new Map<string, number>();
+  /** Cached Nango tokens keyed by source slug */
+  private nangoTokenCache = new Map<string, CachedNangoToken>();
   private cooldownMs: number;
   private log: (message: string) => void;
   private credManager: SourceCredentialManager;
@@ -86,6 +104,76 @@ export class TokenRefreshManager {
    */
   reset(): void {
     this.failedAttempts.clear();
+    this.nangoTokenCache.clear();
+  }
+
+  /**
+   * Check if a cached Nango token is still fresh (not expired or about to expire).
+   */
+  private isNangoCacheFresh(cached: CachedNangoToken): boolean {
+    const now = Date.now();
+    if (cached.expiresAt) {
+      // Token has known expiry — use it until NANGO_REFRESH_BUFFER_MS before expiry
+      return now < cached.expiresAt - NANGO_REFRESH_BUFFER_MS;
+    }
+    // No expiry (e.g. API_KEY) — use TTL-based staleness
+    return now - cached.fetchedAt < NANGO_NO_EXPIRY_TTL_MS;
+  }
+
+  /**
+   * Fetch token from Nango API for Nango-backed sources.
+   * Bypasses all local credential storage and refresh logic.
+   * Caches tokens to avoid redundant API calls.
+   */
+  async ensureNangoToken(source: LoadedSource): Promise<TokenRefreshResult> {
+    const slug = source.config.slug;
+    const nango = source.config.nango;
+
+    if (!nango) {
+      return { success: false, reason: 'Missing nango config' };
+    }
+
+    // Check cache
+    const cached = this.nangoTokenCache.get(slug);
+    if (cached && this.isNangoCacheFresh(cached)) {
+      return { success: true, token: cached.token };
+    }
+
+    // Check cooldown
+    if (this.isInCooldown(slug)) {
+      return { success: false, rateLimited: true, reason: 'Rate limited after recent failure' };
+    }
+
+    const secretKey = process.env.NANGO_SECRET_KEY;
+    if (!secretKey || !isValidNangoSecretKey(secretKey)) {
+      return { success: false, reason: 'NANGO_SECRET_KEY not set or invalid' };
+    }
+
+    try {
+      const host = nango.host || process.env.NANGO_HOST;
+      const result = await getNangoToken(nango, secretKey, host);
+
+      // Cache the token
+      this.nangoTokenCache.set(slug, {
+        token: result.accessToken,
+        expiresAt: result.expiresAt,
+        fetchedAt: Date.now(),
+      });
+      this.clearFailure(slug);
+
+      // Restore auth state
+      markSourceAuthenticated(source.workspaceRootPath, source.config.slug);
+      source.config['isAuthenticated'] = true;
+      source.config.connectionStatus = 'connected';
+      source.config.connectionError = undefined;
+
+      return { success: true, token: result.accessToken };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.log(`[TokenRefresh] Nango fetch failed for ${slug}: ${reason}`);
+      this.recordFailure(slug);
+      return { success: false, reason };
+    }
   }
 
   /**
@@ -112,6 +200,11 @@ export class TokenRefreshManager {
    */
   async ensureFreshToken(source: LoadedSource): Promise<TokenRefreshResult> {
     const slug = source.config.slug;
+
+    // Nango-backed sources: delegate to Nango-specific flow
+    if (source.config.credentialProvider === 'nango' && source.config.nango) {
+      return this.ensureNangoToken(source);
+    }
 
     // Check rate limiting
     if (this.isInCooldown(slug)) {

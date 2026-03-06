@@ -286,6 +286,18 @@ export interface SessionToolContext {
    */
   testGoogleSource?(source: SourceConfig): Promise<ApiTestResult>;
 
+  /**
+   * Test a Nango connection by fetching a token.
+   * Returns success/failure with credential type and expiry info.
+   */
+  testNangoConnection?(nangoConfig: { integrationId: string; connectionId: string; host?: string }): Promise<NangoTestResult>;
+
+  /**
+   * Get the current access token for a source, handling both local credentials and Nango.
+   * Used by connection tests to pass auth tokens to MCP validation.
+   */
+  getSourceToken?(sourceSlug: string): Promise<string | null>;
+
   // ============================================================
   // Preferences (for update_user_preferences)
   // ============================================================
@@ -341,6 +353,8 @@ export interface StdioMcpConfig {
 export interface HttpMcpConfig {
   url: string;
   authType?: string;
+  /** Access token to use for Bearer auth (e.g., from Nango or local credential store) */
+  token?: string;
 }
 
 /**
@@ -376,6 +390,18 @@ export interface ApiTestResult {
   status?: number;
   error?: string;
   hint?: string;
+}
+
+/**
+ * Result from Nango connection test
+ */
+export interface NangoTestResult {
+  success: boolean;
+  error?: string;
+  /** Credential type returned by Nango (e.g., 'OAUTH2', 'API_KEY') */
+  credentialType?: string;
+  /** Token expiry time as ISO string */
+  expiresAt?: string;
 }
 
 // ============================================================

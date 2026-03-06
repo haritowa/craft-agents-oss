@@ -65,7 +65,10 @@ import {
   type MicrosoftService,
 } from '../sources/types.ts';
 import { isGoogleOAuthConfigured as isGoogleOAuthConfiguredImpl } from '../auth/google-oauth.ts';
+import { getNangoToken, isValidNangoSecretKey } from '../sources/nango-provider.ts';
 import { debug } from '../utils/debug.ts';
+import { isDockerAvailable, wrapStdioConfigForDocker } from './docker-env.ts';
+import type { RemoteEnvContext } from './options.ts';
 import { getSessionPlansPath, getSessionPath, getSessionDataPath } from '../sessions/storage.ts';
 import { updatePreferences as updatePreferencesImpl } from '../config/preferences.ts';
 
@@ -81,6 +84,8 @@ export interface ClaudeContextOptions {
   workspaceId: string;
   onPlanSubmitted: (planPath: string) => void;
   onAuthRequest: (request: unknown) => void;
+  /** When set, stdio MCP validation runs inside the Docker container via `docker exec` */
+  remoteEnv?: RemoteEnvContext;
 }
 
 /**
@@ -94,7 +99,7 @@ export interface ClaudeContextOptions {
  * - Icon management
  */
 export function createClaudeContext(options: ClaudeContextOptions): SessionToolContext {
-  const { sessionId, workspacePath, workspaceId, onPlanSubmitted, onAuthRequest } = options;
+  const { sessionId, workspacePath, workspaceId, onPlanSubmitted, onAuthRequest, remoteEnv } = options;
 
   // File system implementation
   const fs: FileSystemInterface = {
@@ -150,8 +155,9 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
         workspaceRootPath: source.workspaceRootPath,
         workspaceId: source.workspaceId,
       };
-      const token = await mgr.getToken(sharedSource);
-      return !!token;
+      // Use hasValidCredentials() which correctly handles Nango sources
+      // (returns true for Nango-backed sources since they manage tokens externally)
+      return mgr.hasValidCredentials(sharedSource);
     },
     getToken: async (source: LoadedSource): Promise<string | null> => {
       const mgr = getSourceCredentialManager();
@@ -180,7 +186,22 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
   // MCP validation
   const validateStdioMcpConnection = async (config: StdioMcpConfig): Promise<StdioValidationResult> => {
     try {
-      const result = await validateStdioMcpConnectionImpl(config);
+      // When Docker sandbox is enabled AND Docker is available, wrap the
+      // command with `docker exec` so the validation runs inside the container.
+      let effectiveConfig = config;
+      if (remoteEnv?.enabled && isDockerAvailable()) {
+        const wrapped = wrapStdioConfigForDocker(
+          { type: 'stdio', command: config.command, args: config.args, env: config.env },
+          remoteEnv.sessionId,
+        );
+        effectiveConfig = {
+          command: wrapped.command,
+          args: wrapped.args,
+          env: wrapped.env,
+        };
+      }
+
+      const result = await validateStdioMcpConnectionImpl(effectiveConfig);
       return {
         success: result.success,
         error: result.error,
@@ -219,6 +240,7 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
 
       const result = await validateMcpConnectionImpl({
         mcpUrl: config.url,
+        mcpAccessToken: config.token || undefined,
         claudeApiKey: apiKey || undefined,
         claudeOAuthToken: oauthToken || undefined,
       });
@@ -287,6 +309,57 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
     // MCP validation
     validateStdioMcpConnection,
     validateMcpConnection,
+
+    // Nango connection test
+    testNangoConnection: async (nangoConfig) => {
+      const secretKey = process.env.NANGO_SECRET_KEY;
+      if (!secretKey) {
+        return { success: false, error: 'NANGO_SECRET_KEY environment variable is not set' };
+      }
+      if (!isValidNangoSecretKey(secretKey)) {
+        return { success: false, error: 'NANGO_SECRET_KEY is not a valid UUID v4 — you may be using the Nango Public Key instead of the Secret Key' };
+      }
+      try {
+        const host = nangoConfig.host || process.env.NANGO_HOST;
+        const result = await getNangoToken(nangoConfig as any, secretKey, host);
+        return {
+          success: true,
+          credentialType: result.expiresAt ? 'OAUTH2' : 'API_KEY',
+          expiresAt: result.expiresAt ? new Date(result.expiresAt).toISOString() : undefined,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    },
+
+    // Source token getter — handles both local credentials and Nango
+    getSourceToken: async (sourceSlug: string): Promise<string | null> => {
+      const config = loadSourceConfigImpl(workspacePath, sourceSlug);
+      if (!config) return null;
+      const source: SharedLoadedSource = {
+        config: config as FolderSourceConfig,
+        guide: null,
+        folderPath: getSourcePath(workspacePath, sourceSlug),
+        workspaceRootPath: workspacePath,
+        workspaceId,
+      };
+      // Nango sources: fetch from Nango API
+      if (config.credentialProvider === 'nango' && config.nango) {
+        const secretKey = process.env.NANGO_SECRET_KEY;
+        if (!secretKey || !isValidNangoSecretKey(secretKey)) return null;
+        try {
+          const host = config.nango.host || process.env.NANGO_HOST;
+          const result = await getNangoToken(config.nango as any, secretKey, host);
+          return result.accessToken;
+        } catch {
+          return null;
+        }
+      }
+      // Local sources: use credential manager
+      const mgr = getSourceCredentialManager();
+      return mgr.getToken(source);
+    },
 
     // Icon helpers (simplified - full implementation would use logo.ts)
     isIconUrl: (value: string): boolean => {

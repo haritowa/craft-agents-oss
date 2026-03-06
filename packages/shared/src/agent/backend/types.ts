@@ -33,6 +33,7 @@ import type { ModelProvider } from '../../config/models.ts';
 import type { LlmAuthType, LlmProviderType } from '../../config/llm-connections.ts';
 export type { LlmAuthType, LlmProviderType } from '../../config/llm-connections.ts';
 import type { AutomationSystem } from '../../automations/index.ts';
+import type { RemoteEnvContext } from '../options.ts';
 
 /**
  * Provider identifier for AI backends.
@@ -189,6 +190,12 @@ export interface CoreBackendConfig {
    * Spread after process.env in backend-specific option builders.
    */
   envOverrides?: Record<string, string>;
+
+  /**
+   * Remote environment config for Docker sandbox.
+   * When enabled, the agent subprocess runs inside a Docker container.
+   */
+  remoteEnv?: RemoteEnvContext;
 
   /**
    * Centralized MCP client pool for source tool execution.

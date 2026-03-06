@@ -315,7 +315,8 @@ export function getSystemPrompt(
   workspaceRootPath?: string,
   workingDirectory?: string,
   preset?: SystemPromptPreset | string,
-  backendName?: string
+  backendName?: string,
+  isDockerSandbox?: boolean
 ): string {
   // Use mini agent prompt for quick edits (pass workspace root for config paths)
   if (preset === 'mini') {
@@ -333,7 +334,7 @@ export function getSystemPrompt(
   // Note: Date/time context is now added to user messages instead of system prompt
   // to enable prompt caching. The system prompt stays static and cacheable.
   // Safe Mode context is also in user messages for the same reason.
-  const basePrompt = getCraftAssistantPrompt(workspaceRootPath, backendName);
+  const basePrompt = getCraftAssistantPrompt(workspaceRootPath, backendName, isDockerSandbox);
   const fullPrompt = `${basePrompt}${preferences}${debugContext}${projectContextFiles}`;
 
   debug('[getSystemPrompt] full prompt length:', fullPrompt.length);
@@ -410,7 +411,37 @@ function getCraftAgentEnvironmentMarker(): string {
  * @param workspaceRootPath - Root path of the workspace
  * @param backendName - Backend name for "powered by X" text (default: 'Claude Code')
  */
-function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Claude Code'): string {
+function getDockerSandboxPrompt(): string {
+  return `## Package Installation (Docker Sandbox)
+
+You are running inside a Docker sandbox with **Devbox** for package management. Devbox uses Nix under the hood for reproducible, isolated installs.
+
+**CRITICAL RULES — read carefully:**
+1. **Always** use \`devbox\` to install packages. NEVER use \`apt-get\`, \`apt\`, or \`dpkg\` — those installs are lost when the container restarts.
+2. **Always** pass \`-c $DEVBOX_USER_PROJECT\` on every devbox command so packages persist across sessions. Without this flag, packages are installed to an ephemeral location and lost on restart.
+3. **Never** \`cd\` into \`$DEVBOX_USER_PROJECT\` or use it as a working directory. Only reference it via the \`-c\` flag.
+4. The \`$DEVBOX_USER_PROJECT\` directory is already initialized — just run \`devbox add\` directly. If you get a "no devbox.json found" error, run: \`devbox init -c "$DEVBOX_USER_PROJECT"\` then retry.
+
+| Task | Command |
+|------|---------|
+| Install a package | \`devbox add <package> -c $DEVBOX_USER_PROJECT\` |
+| Remove a package | \`devbox rm <package> -c $DEVBOX_USER_PROJECT\` |
+| Search for packages | \`devbox search <query>\` |
+| List installed packages | \`devbox list -c $DEVBOX_USER_PROJECT\` |
+| Activate after install | \`eval "$(devbox shellenv --pure=false -c "$DEVBOX_USER_PROJECT")"\` |
+
+After \`devbox add\`, you MUST activate the environment in the same shell to use the newly installed package:
+\`\`\`bash
+devbox add go -c "$DEVBOX_USER_PROJECT" && eval "$(devbox shellenv --pure=false -c "$DEVBOX_USER_PROJECT")"
+\`\`\`
+
+**Pre-installed:** Node.js 22, Python 3.13, Bun, git, ripgrep, jq, curl.
+
+For language-specific packages, prefer devbox when a Nix package exists: \`devbox search <name>\` to find it, then \`devbox add <nixpkg> -c "$DEVBOX_USER_PROJECT"\`. For npm/pip packages without a Nix equivalent, \`npm install -g\` or \`pip install\` work but do **not** persist across container restarts.
+`;
+}
+
+function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Claude Code', isDockerSandbox?: boolean): string {
   // Default to ${APP_ROOT}/workspaces/{id} if no path provided
   const workspacePath = workspaceRootPath || `${APP_ROOT}/workspaces/{id}`;
 
@@ -500,7 +531,7 @@ Read relevant context files using the Read tool - they contain architecture info
 You can store and update user preferences using the \`update_user_preferences\` tool. 
 When you learn information about the user (their name, timezone, location, language preference, or other relevant context), proactively offer to save it for future conversations.
 
-## Interaction Guidelines
+${isDockerSandbox ? getDockerSandboxPrompt() : ''}## Interaction Guidelines
 
 1. **Be Concise**: Provide focused, actionable responses.
 2. **Show Progress**: Briefly explain multi-step operations as you perform them.

@@ -245,6 +245,8 @@ export interface McpSourceConfig {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Env var name to inject the auth token into for stdio servers (e.g., "GITHUB_TOKEN") */
+  tokenEnvVar?: string;
 }
 
 /**
@@ -289,6 +291,15 @@ export interface LocalSourceConfig {
 export type ConnectionStatus = 'connected' | 'disconnected' | 'error' | 'unknown';
 
 /**
+ * Nango credential provider configuration (mirrors shared/sources/types.ts).
+ */
+export interface NangoSourceConfig {
+  integrationId: string;
+  connectionId: string;
+  host?: string;
+}
+
+/**
  * Full source configuration (simplified version for core package)
  */
 export interface SourceConfig {
@@ -302,7 +313,7 @@ export interface SourceConfig {
   api?: ApiSourceConfig;
   local?: LocalSourceConfig;
   isAuthenticated?: boolean;
-  lastTestedAt?: string; // ISO date string
+  lastTestedAt?: number; // epoch ms
   createdAt?: number;
   updatedAt?: number;
   // Display fields
@@ -311,4 +322,7 @@ export interface SourceConfig {
   // Connection tracking
   connectionStatus?: ConnectionStatus;
   connectionError?: string;
+  // Nango credential provider (optional — when set, tokens come from Nango)
+  credentialProvider?: 'local' | 'nango';
+  nango?: NangoSourceConfig;
 }

@@ -1358,6 +1358,8 @@ export interface WorkspaceSettings {
   workingDirectory?: string
   /** Whether local (stdio) MCP servers are enabled */
   localMcpEnabled?: boolean
+  /** Whether Docker sandbox is enabled for sessions in this workspace */
+  dockerEnabled?: boolean
   /** Default LLM connection slug for new sessions in this workspace */
   defaultLlmConnection?: string
   /** Source slugs to auto-enable for new sessions */

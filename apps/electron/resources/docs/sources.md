@@ -56,6 +56,18 @@ Example questions:
 > 2. Are there specific teams or projects you want to focus on?
 > 3. Should I set it up for read-only exploration or full access?"
 
+### 1.5. Check for Nango Connections (When Available)
+
+If `NANGO_SECRET_KEY` is set in the environment, **always check for matching Nango connections before proceeding with local OAuth**:
+
+1. Call `nango_list_connections` with a search matching the service name (e.g., "google", "slack", "github")
+2. If a matching connection exists, offer it to the user:
+   > "I found a Nango connection for Google Mail (integrationId: google-mail, connectionId: user-123). Would you like to use Nango for authentication? It handles token refresh automatically."
+3. If user accepts: set `credentialProvider: "nango"` in config.json with the matched connection details. Skip the auth trigger step entirely.
+4. If user declines or no match found: proceed with local OAuth as usual.
+
+**Why check Nango first:** Nango handles token refresh server-side, eliminating local refresh failures. If a connection already exists, it's the path of least friction.
+
 ### 2. Research the Service
 
 Use available tools to learn about the service:
@@ -148,6 +160,10 @@ The `source_test` tool:
 2. **Downloads and caches the icon** if a URL was provided
 3. **Tests the connection** to verify the source is reachable
 4. **Reports missing fields** (icon, tagline) that should be added
+
+For Nango-backed sources, `source_test` performs **full verification** — it calls the Nango API to fetch a token and confirms the connection is alive. If the test fails, check:
+- `NANGO_SECRET_KEY` is set and is the **Secret Key** (UUID v4 format), not the Public Key
+- The connection exists and is active in your Nango dashboard
 
 After validation passes, trigger the appropriate auth flow:
 - OAuth sources: `source_oauth_trigger({ sourceSlug: "{slug}" })`

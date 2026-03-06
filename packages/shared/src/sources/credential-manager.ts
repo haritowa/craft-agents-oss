@@ -337,6 +337,10 @@ export class SourceCredentialManager {
    * Check if source has valid (non-expired) credentials
    */
   async hasValidCredentials(source: LoadedSource): Promise<boolean> {
+    // Nango-backed sources manage credentials externally — always valid from our perspective
+    if (source.config.credentialProvider === 'nango' && source.config.nango) {
+      return true;
+    }
     const token = await this.getToken(source);
     return token !== null;
   }
@@ -865,6 +869,11 @@ export class SourceCredentialManager {
  * - API sources with bearer/basic/header/query auth → needs auth if not authenticated
  */
 export function sourceNeedsAuthentication(source: LoadedSource): boolean {
+  // Nango-backed sources handle authentication externally — never prompt for local auth
+  if (source.config.credentialProvider === 'nango' && source.config.nango) {
+    return false;
+  }
+
   const mcp = source.config.mcp;
   const api = source.config.api;
 

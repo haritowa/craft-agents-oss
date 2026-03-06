@@ -3,6 +3,37 @@
 import { loadShellEnv } from './shell-env'
 loadShellEnv()
 
+// Load .env from project root (for NANGO_SECRET_KEY, NANGO_HOST, etc.)
+// These are runtime secrets not baked into the build — they must be loaded at startup.
+import { existsSync, readFileSync } from 'fs'
+import { join, dirname } from 'path'
+{
+  // Walk up from the app dir to find .env (works in both dev and packaged builds)
+  let dir = __dirname
+  for (let i = 0; i < 5; i++) {
+    const envPath = join(dir, '.env')
+    if (existsSync(envPath)) {
+      const content = readFileSync(envPath, 'utf-8')
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith('#')) continue
+        const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/)
+        if (match) {
+          const [, key, rawValue] = match
+          // Don't override existing env vars (shell takes precedence)
+          if (!process.env[key!]) {
+            // Strip surrounding quotes if present
+            const value = rawValue!.replace(/^["']|["']$/g, '')
+            process.env[key!] = value
+          }
+        }
+      }
+      break
+    }
+    dir = dirname(dir)
+  }
+}
+
 import { app, BrowserWindow } from 'electron'
 import { createHash } from 'crypto'
 import { hostname, homedir } from 'os'
@@ -564,7 +595,10 @@ process.on('uncaughtException', (error) => {
   Sentry.captureException(error)
 })
 
-process.on('unhandledRejection', (reason, promise) => {
-  mainLog.error('Unhandled rejection at:', promise, 'reason:', reason)
-  Sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)))
+process.on('unhandledRejection', (reason) => {
+  const detail = reason instanceof Error
+    ? (reason.stack ?? `${reason.name}: ${reason.message}`)
+    : String(reason)
+  mainLog.error('Unhandled rejection:', detail)
+  Sentry.captureException(reason instanceof Error ? reason : new Error(detail))
 })

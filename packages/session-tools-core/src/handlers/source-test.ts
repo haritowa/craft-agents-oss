@@ -134,7 +134,7 @@ export async function handleSourceTest(
   if (ctx.saveSourceConfig) {
     const updatedSource: SourceConfig = {
       ...source,
-      lastTestedAt: new Date().toISOString(),
+      lastTestedAt: Date.now(),
       connectionStatus,
       connectionError,
     };
@@ -638,10 +638,24 @@ async function testMcpConnection(
     if (ctx.validateStdioMcpConnection && source.mcp.command) {
       lines.push(`ℹ Testing stdio MCP: ${source.mcp.command}`);
       try {
+        // Build env: inject token into env var if tokenEnvVar is configured
+        // This handles both local credentials and Nango tokens for stdio servers
+        let env = source.mcp.env;
+        if (source.mcp.tokenEnvVar && ctx.getSourceToken) {
+          try {
+            const token = await ctx.getSourceToken(_sourceSlug);
+            if (token) {
+              env = { ...env, [source.mcp.tokenEnvVar]: token };
+            }
+          } catch {
+            // Token fetch failed — proceed without injection
+          }
+        }
+
         const result = await ctx.validateStdioMcpConnection({
           command: source.mcp.command,
           args: source.mcp.args || [],
-          env: source.mcp.env,
+          env,
         });
         if (result.success) {
           success = true;
@@ -688,9 +702,19 @@ async function testMcpConnection(
     if (ctx.validateMcpConnection) {
       lines.push(`ℹ Testing MCP server: ${source.mcp.url}`);
       try {
+        // Get access token for authenticated MCP sources (local credentials or Nango)
+        let token: string | undefined;
+        if (source.mcp.authType && source.mcp.authType !== 'none' && ctx.getSourceToken) {
+          try {
+            token = (await ctx.getSourceToken(_sourceSlug)) || undefined;
+          } catch {
+            // Token fetch failed — proceed without auth, server may report needs-auth
+          }
+        }
         const result = await ctx.validateMcpConnection({
           url: source.mcp.url,
           authType: source.mcp.authType,
+          token,
         });
         if (result.success) {
           success = true;
@@ -774,6 +798,46 @@ async function checkAuthStatus(
 ): Promise<{ lines: string[]; hasWarning: boolean }> {
   const lines: string[] = [];
   let hasWarning = false;
+
+  // Nango-backed sources: verify the connection by fetching a token from Nango API
+  if (source.credentialProvider === 'nango' && source.nango) {
+    lines.push(`Nango credential provider (integrationId: ${source.nango.integrationId}, connectionId: ${source.nango.connectionId})`);
+
+    if (ctx.testNangoConnection) {
+      try {
+        const result = await ctx.testNangoConnection(source.nango);
+        if (result.success) {
+          lines.push(`✓ Nango connection verified — token fetched successfully`);
+          if (result.credentialType) {
+            lines.push(`  Credential type: ${result.credentialType}`);
+          }
+          if (result.expiresAt) {
+            lines.push(`  Expires at: ${result.expiresAt}`);
+          }
+        } else {
+          hasWarning = true;
+          lines.push(`✗ Nango connection failed: ${result.error || 'Unknown error'}`);
+          lines.push('  Check NANGO_SECRET_KEY and verify the connection exists in your Nango dashboard');
+        }
+      } catch (err) {
+        hasWarning = true;
+        const msg = err instanceof Error ? err.message : String(err);
+        lines.push(`✗ Nango connection test error: ${msg}`);
+      }
+    } else {
+      // Codex context or no Nango test capability — show config-only status
+      lines.push(`✓ Configured via Nango`);
+      if (!source.isAuthenticated) {
+        hasWarning = true;
+        lines.push('⚠ Source marked as not authenticated — may need NANGO_SECRET_KEY to be set');
+      }
+    }
+
+    if (source.lastTestedAt) {
+      lines.push(`  Last tested: ${new Date(source.lastTestedAt).toLocaleString()}`);
+    }
+    return { lines, hasWarning };
+  }
 
   if (source.isAuthenticated) {
     // In Codex context (no validateMcpConnection), MCP source credentials are delivered
